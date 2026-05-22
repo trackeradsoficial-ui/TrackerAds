@@ -78,7 +78,16 @@ export async function POST(
     )
   }
 
-  // 2. Solicita o pairing code — GET com number como query param (Evolution API v1.8.2)
+  // 2. Desconecta a instância atual para garantir estado limpo
+  await fetch(`${EVOLUTION_URL}/instance/logout/${id}`, {
+    method: 'DELETE',
+    headers: { apikey: EVOLUTION_KEY },
+  })
+
+  // 3. Aguarda 2 segundos para a instância ser desconectada
+  await new Promise((resolve) => setTimeout(resolve, 2000))
+
+  // 4. Solicita o pairing code — GET com number como query param (Evolution API v1.8.2)
   const connectUrl = `${EVOLUTION_URL}/instance/connect/${id}?number=${encodeURIComponent(client.whatsapp_number)}`
   const connectRes = await fetch(connectUrl, {
     method: 'GET',
