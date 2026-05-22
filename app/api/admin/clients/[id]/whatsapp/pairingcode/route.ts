@@ -30,8 +30,8 @@ async function requireAdmin() {
 
 // POST /api/admin/clients/[id]/whatsapp/pairingcode
 // 1. Garante que a instância existe
-// 2. Chama POST /instance/connect/{instanceName} com o número do cliente
-// 3. Retorna o pairingCode de 8 dígitos
+// 2. Chama GET /instance/connect/{instanceName}?number={phone} (Evolution API v1.8.2)
+// 3. Retorna { pairingCode: "..." }
 export async function POST(
   _req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -78,16 +78,11 @@ export async function POST(
     )
   }
 
-  // 2. Solicita o pairing code com o número do cliente
-  const connectRes = await fetch(`${EVOLUTION_URL}/instance/connect/${id}`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      apikey: EVOLUTION_KEY,
-    },
-    body: JSON.stringify({
-      number: client.whatsapp_number,
-    }),
+  // 2. Solicita o pairing code — GET com number como query param (Evolution API v1.8.2)
+  const connectUrl = `${EVOLUTION_URL}/instance/connect/${id}?number=${encodeURIComponent(client.whatsapp_number)}`
+  const connectRes = await fetch(connectUrl, {
+    method: 'GET',
+    headers: { apikey: EVOLUTION_KEY },
   })
 
   if (!connectRes.ok) {
@@ -100,11 +95,8 @@ export async function POST(
   }
 
   const connectData = await connectRes.json()
-  const pairingCode: string | null =
-    connectData?.pairingCode ??
-    connectData?.pairing_code ??
-    connectData?.code ??
-    null
+  // Evolution API v1.8.2 retorna o código diretamente em pairingCode
+  const pairingCode: string | null = connectData?.pairingCode ?? null
 
   if (!pairingCode) {
     console.error('[pairingcode] Código não encontrado:', JSON.stringify(connectData))
