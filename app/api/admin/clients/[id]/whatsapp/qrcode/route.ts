@@ -39,7 +39,7 @@ export async function GET(
 
   const { id } = await params
 
-  // 1. Try to create instance (may already exist — that's fine)
+  // 1. Try to create instance — if it already exists (400/409) that's fine, skip
   const createRes = await fetch(`${EVOLUTION_URL}/instance/create`, {
     method: 'POST',
     headers: {
@@ -53,8 +53,16 @@ export async function GET(
   })
 
   if (!createRes.ok) {
-    const err = await createRes.text()
-    console.warn('Evolution create instance warning:', err)
+    const createBody = await createRes.text()
+    // 400 / 409 means the instance already exists — that's acceptable, proceed
+    if (createRes.status !== 400 && createRes.status !== 409) {
+      console.error('Evolution create instance error:', createBody)
+      return NextResponse.json(
+        { error: `Erro ao criar instância: ${createBody}` },
+        { status: 502 }
+      )
+    }
+    console.log(`Instance "${id}" already exists, proceeding to connect.`)
   }
 
   // 2. Connect and get QR code
@@ -72,13 +80,22 @@ export async function GET(
 
   const connectData = await connectRes.json()
 
-  // Extract base64 from various possible response shapes
+  // Evolution API v2 returns the base64 directly in connectData.base64
+  // Fallback to nested shapes just in case
   const base64 =
+    connectData?.base64 ??
     connectData?.qrcode?.base64 ??
     connectData?.qrcode?.qrcode?.base64 ??
     connectData?.qrcode?.code ??
-    connectData?.base64 ??
     null
+
+  if (!base64) {
+    console.error('QR code base64 not found in response:', JSON.stringify(connectData))
+    return NextResponse.json(
+      { error: 'QR code não encontrado na resposta da Evolution API', raw: connectData },
+      { status: 502 }
+    )
+  }
 
   // Update status to "connecting" in Supabase
   await serviceClient()
@@ -86,5 +103,5 @@ export async function GET(
     .update({ whatsapp_status: 'connecting' })
     .eq('id', id)
 
-  return NextResponse.json({ base64, raw: connectData })
+  return NextResponse.json({ base64 })
 }
