@@ -24,16 +24,13 @@ export default function WhatsAppConnect({ clientId, initialStatus }: Props) {
     }
   }, [])
 
-  // Poll connection state every 3 seconds
+  // Poll connection state via server-side status route every 3 seconds
   const startPolling = useCallback(() => {
     stopPolling()
     pollRef.current = setInterval(async () => {
       try {
-        const res = await fetch(`/api/admin/clients/${clientId}/whatsapp`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'status' }),
-        })
+        const res = await fetch(`/api/admin/clients/${clientId}/whatsapp/status`)
+        if (!res.ok) return
         const data = await res.json()
 
         if (data.state === 'open') {
@@ -56,12 +53,8 @@ export default function WhatsAppConnect({ clientId, initialStatus }: Props) {
     setQrBase64(null)
 
     try {
-      const res = await fetch(`/api/admin/clients/${clientId}/whatsapp`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'connect' }),
-      })
-
+      // Server-side route calls Evolution API — avoids HTTP/HTTPS mixed content
+      const res = await fetch(`/api/admin/clients/${clientId}/whatsapp/qrcode`)
       const data = await res.json()
 
       if (!res.ok) {
@@ -70,19 +63,14 @@ export default function WhatsAppConnect({ clientId, initialStatus }: Props) {
         return
       }
 
-      // Extract base64 from qrcode response
-      const base64 =
-        data.qrcode?.base64 ??
-        data.qrcode?.qrcode?.base64 ??
-        data.qrcode?.code ??
-        null
+      const base64 = data.base64 ?? null
 
       if (base64) {
         setQrBase64(base64)
         setStatus('awaiting_scan')
         startPolling()
       } else {
-        // Maybe already connected or different response shape
+        // No QR yet — might already be connected or pending
         setStatus('awaiting_scan')
         startPolling()
       }
