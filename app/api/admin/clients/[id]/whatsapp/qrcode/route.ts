@@ -39,7 +39,7 @@ export async function GET(
 
   const { id } = await params
 
-  // 1. Try to create instance — if it already exists (400/409) that's fine, skip
+  // 1. Create instance — ignore 403 if it already exists
   const createRes = await fetch(`${EVOLUTION_URL}/instance/create`, {
     method: 'POST',
     headers: {
@@ -54,46 +54,64 @@ export async function GET(
 
   if (!createRes.ok) {
     const createBody = await createRes.text()
-    // 400 / 409 means the instance already exists — that's acceptable, proceed
-    if (createRes.status !== 400 && createRes.status !== 409) {
+    // 400 / 403 / 409 all indicate the instance already exists — proceed
+    if (![400, 403, 409].includes(createRes.status)) {
       console.error('Evolution create instance error:', createBody)
       return NextResponse.json(
         { error: `Erro ao criar instância: ${createBody}` },
         { status: 502 }
       )
     }
-    console.log(`Instance "${id}" already exists, proceeding to connect.`)
+    console.log(`Instance "${id}" already exists (${createRes.status}), proceeding to connect.`)
   }
 
-  // 2. Connect and get QR code
+  // 2. Trigger the connect flow (starts QR code generation)
   const connectRes = await fetch(`${EVOLUTION_URL}/instance/connect/${id}`, {
     headers: { apikey: EVOLUTION_KEY },
   })
 
   if (!connectRes.ok) {
     const err = await connectRes.text()
+    console.error('Evolution connect error:', err)
     return NextResponse.json(
-      { error: `Erro ao obter QR code: ${err}` },
+      { error: `Erro ao iniciar conexão: ${err}` },
       { status: 502 }
     )
   }
 
-  const connectData = await connectRes.json()
+  // 3. Wait 3 seconds for the QR code to be generated
+  await new Promise((resolve) => setTimeout(resolve, 3000))
 
-  // Evolution API v2 returns the base64 directly in connectData.base64
-  // Fallback to nested shapes just in case
+  // 4. Fetch the instance data — QR code is available here in v2.2.3
+  const fetchRes = await fetch(
+    `${EVOLUTION_URL}/instance/fetchInstances?instanceName=${encodeURIComponent(id)}`,
+    { headers: { apikey: EVOLUTION_KEY } }
+  )
+
+  if (!fetchRes.ok) {
+    const err = await fetchRes.text()
+    console.error('Evolution fetchInstances error:', err)
+    return NextResponse.json(
+      { error: `Erro ao buscar instância: ${err}` },
+      { status: 502 }
+    )
+  }
+
+  const instances = await fetchRes.json()
+
+  // Response is an array; grab the first matching instance
+  const instance = Array.isArray(instances) ? instances[0] : instances
+
   const base64 =
-    connectData?.base64 ??
-    connectData?.qrcode?.base64 ??
-    connectData?.qrcode?.qrcode?.base64 ??
-    connectData?.qrcode?.code ??
+    instance?.qrcode?.base64 ??
+    instance?.qrcode?.pairingCode ??
     null
 
   if (!base64) {
-    console.error('QR code base64 not found in response:', JSON.stringify(connectData))
+    console.warn('QR code not ready yet:', JSON.stringify(instance?.qrcode ?? instance))
     return NextResponse.json(
-      { error: 'QR code não encontrado na resposta da Evolution API', raw: connectData },
-      { status: 502 }
+      { error: 'QR Code ainda sendo gerado, tente novamente' },
+      { status: 202 }
     )
   }
 
