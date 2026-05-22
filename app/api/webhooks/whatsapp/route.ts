@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { hashPhone, sendCapiEvent } from '@/lib/capi'
 
-// Service-role client — bypasses RLS for webhook processing
+// Cliente com service role — ignora RLS no processamento de webhooks
 function getServiceClient() {
   return createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -10,121 +10,135 @@ function getServiceClient() {
   )
 }
 
-// Evolution API sends a GET with hub.challenge for webhook verification
+// Evolution API envia GET com hub.challenge para verificação do webhook
 export async function GET(req: NextRequest) {
   const challenge = req.nextUrl.searchParams.get('hub.challenge')
-  if (challenge) {
-    return new NextResponse(challenge, { status: 200 })
-  }
+  if (challenge) return new NextResponse(challenge, { status: 200 })
   return NextResponse.json({ ok: true })
 }
 
+// POST /api/webhooks/whatsapp
+// Recebe eventos CHATS_UPDATE da Evolution API v1.8.2
+// Dispara evento Purchase no Facebook CAPI quando label "Comprou" for detectada
 export async function POST(req: NextRequest) {
   try {
-    // Optional webhook secret verification
+    // Verificação opcional de segredo do webhook
     const secret = process.env.WEBHOOK_SECRET
     if (secret) {
-      const incoming = req.headers.get('x-webhook-secret') ?? req.headers.get('authorization')
+      const incoming =
+        req.headers.get('x-webhook-secret') ?? req.headers.get('authorization')
       if (incoming !== secret) {
-        return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+        return NextResponse.json({ error: 'Não autorizado' }, { status: 401 })
       }
     }
 
     const body = await req.json()
 
-    // Evolution API webhook event for label assignment
-    // Event: "labels.upsert" or "chats.upsert" — label name "Comprou"
     const event: string = body?.event ?? body?.type ?? ''
     const data = body?.data ?? body
 
-    // Extract label name and remote JID (phone number)
-    let labelName: string | undefined
-    let remoteJid: string | undefined
-
-    if (event === 'labels.upsert' || event === 'label.association') {
-      labelName = data?.label?.name ?? data?.labelName ?? data?.label
-      remoteJid = data?.id ?? data?.remoteJid ?? data?.contact?.remoteJid
-    } else if (event === 'chats.upsert') {
-      // Some Evolution versions embed label in chat upsert
-      labelName = data?.labels?.[0] ?? data?.label
-      remoteJid = data?.id ?? data?.remoteJid
-    } else {
-      // Unsupported event — acknowledge and skip
-      return NextResponse.json({ ok: true, skipped: true })
+    // Só processa CHATS_UPDATE
+    if (event !== 'CHATS_UPDATE' && event !== 'chats.update') {
+      return NextResponse.json({ ok: true, ignorado: true, event })
     }
 
-    if (!labelName || !remoteJid) {
-      return NextResponse.json({ ok: true, skipped: true, reason: 'missing label or jid' })
+    // Em CHATS_UPDATE o payload pode ser um array ou objeto único
+    const chats: unknown[] = Array.isArray(data) ? data : [data]
+
+    for (const chat of chats) {
+      const c = chat as Record<string, unknown>
+
+      // Verifica se a etiqueta "Comprou" está presente
+      const labels: unknown[] = Array.isArray(c?.labels) ? (c.labels as unknown[]) : []
+      const temComprou = labels.some(
+        (l) =>
+          (typeof l === 'string' && l.toLowerCase().trim() === 'comprou') ||
+          (typeof l === 'object' &&
+            l !== null &&
+            typeof (l as Record<string, unknown>).name === 'string' &&
+            ((l as Record<string, unknown>).name as string).toLowerCase().trim() === 'comprou')
+      )
+
+      if (!temComprou) continue
+
+      // JID do contato: "5511999999999@s.whatsapp.net"
+      const remoteJid: string =
+        (c?.id as string) ?? (c?.remoteJid as string) ?? ''
+      if (!remoteJid) continue
+
+      const phoneRaw = remoteJid.split('@')[0]
+
+      // Nome da instância identifica qual cliente enviou o evento
+      const instanceName: string =
+        (body?.instance as string) ?? (body?.instanceName as string) ?? ''
+
+      const supabase = getServiceClient()
+
+      // Busca o cliente pelo número da instância ou pelo número do WhatsApp
+      const { data: client, error: clientError } = await supabase
+        .from('clients')
+        .select('id, pixel_id, capi_token, whatsapp_number, is_active')
+        .or(
+          `whatsapp_number.eq.${phoneRaw},whatsapp_number.eq.${instanceName}`
+        )
+        .eq('is_active', true)
+        .single()
+
+      if (clientError || !client) {
+        console.error(
+          '[webhook] Cliente não encontrado para instância/número:',
+          instanceName,
+          phoneRaw,
+          clientError
+        )
+        continue
+      }
+
+      const phoneHashed = hashPhone(phoneRaw)
+
+      // Salva lead no Supabase
+      const { data: lead, error: leadError } = await supabase
+        .from('leads')
+        .insert({
+          client_id: client.id,
+          phone_raw: phoneRaw,
+          phone_hashed: phoneHashed,
+          label: 'Comprou',
+          status: 'converted',
+          facebook_event_sent: false,
+        })
+        .select()
+        .single()
+
+      if (leadError || !lead) {
+        console.error('[webhook] Erro ao salvar lead:', leadError)
+        continue
+      }
+
+      // Dispara evento Purchase no Facebook CAPI
+      const { success, response: capiResponse } = await sendCapiEvent(
+        client.pixel_id,
+        client.capi_token,
+        phoneHashed
+      )
+
+      // Atualiza lead com resultado do CAPI
+      await supabase
+        .from('leads')
+        .update({
+          facebook_event_sent: success,
+          facebook_event_response: capiResponse,
+        })
+        .eq('id', lead.id)
+
+      console.log(
+        `[webhook] Lead ${lead.id} processado — CAPI enviado: ${success}`
+      )
     }
 
-    // Only process "Comprou" label (case-insensitive)
-    if (labelName.toLowerCase().trim() !== 'comprou') {
-      return NextResponse.json({ ok: true, skipped: true, reason: 'label not Comprou' })
-    }
-
-    // Normalize phone: Evolution JID format is "5511999999999@s.whatsapp.net"
-    const phoneRaw = remoteJid.split('@')[0]
-
-    // The webhook doesn't carry which instance (WhatsApp number) it came from
-    // Evolution sends the instance name in the payload
-    const instanceName: string = body?.instance ?? data?.instance ?? ''
-
-    const supabase = getServiceClient()
-
-    // Look up client by WhatsApp number OR instance name
-    // whatsapp_number stored as digits only (e.g. "5511999999999")
-    const { data: client, error: clientError } = await supabase
-      .from('clients')
-      .select('id, pixel_id, capi_token, whatsapp_number, is_active')
-      .or(`whatsapp_number.eq.${phoneRaw},whatsapp_number.eq.${instanceName}`)
-      .eq('is_active', true)
-      .single()
-
-    if (clientError || !client) {
-      console.error('Client not found for instance/number:', instanceName, phoneRaw, clientError)
-      return NextResponse.json({ error: 'Client not found' }, { status: 404 })
-    }
-
-    const phoneHashed = hashPhone(phoneRaw)
-
-    // Insert lead record
-    const { data: lead, error: leadError } = await supabase
-      .from('leads')
-      .insert({
-        client_id: client.id,
-        phone_raw: phoneRaw,
-        phone_hashed: phoneHashed,
-        label: labelName,
-        status: 'converted',
-        facebook_event_sent: false,
-      })
-      .select()
-      .single()
-
-    if (leadError || !lead) {
-      console.error('Failed to insert lead:', leadError)
-      return NextResponse.json({ error: 'Failed to save lead' }, { status: 500 })
-    }
-
-    // Send CAPI event
-    const { success, response: capiResponse } = await sendCapiEvent(
-      client.pixel_id,
-      client.capi_token,
-      phoneHashed
-    )
-
-    // Update lead with CAPI result
-    await supabase
-      .from('leads')
-      .update({
-        facebook_event_sent: success,
-        facebook_event_response: capiResponse,
-      })
-      .eq('id', lead.id)
-
-    return NextResponse.json({ ok: true, lead_id: lead.id, capi_sent: success })
+    return NextResponse.json({ ok: true })
   } catch (err) {
-    console.error('Webhook error:', err)
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
+    console.error('[webhook] Erro interno:', err)
+    return NextResponse.json({ error: 'Erro interno do servidor' }, { status: 500 })
   }
 }

@@ -24,7 +24,25 @@ export default function WhatsAppConnect({ clientId, initialStatus }: Props) {
     }
   }, [])
 
-  // Poll connection state via server-side status route every 3 seconds
+  // Configura webhook automaticamente após conexão bem-sucedida
+  const configurarWebhook = useCallback(async () => {
+    try {
+      const res = await fetch(
+        `/api/admin/clients/${clientId}/whatsapp/webhook`,
+        { method: 'POST' }
+      )
+      if (!res.ok) {
+        const data = await res.json()
+        console.error('Erro ao configurar webhook:', data.error)
+      } else {
+        console.log('Webhook configurado com sucesso.')
+      }
+    } catch (err) {
+      console.error('Falha ao configurar webhook:', err)
+    }
+  }, [clientId])
+
+  // Polling a cada 3 segundos no status da conexão
   const startPolling = useCallback(() => {
     stopPolling()
     pollRef.current = setInterval(async () => {
@@ -37,14 +55,16 @@ export default function WhatsAppConnect({ clientId, initialStatus }: Props) {
           stopPolling()
           setStatus('connected')
           setQrBase64(null)
+          // Configura webhook automaticamente ao detectar conexão
+          await configurarWebhook()
         }
       } catch {
-        // silently ignore transient errors during polling
+        // Ignora erros transientes durante o polling
       }
     }, 3000)
-  }, [clientId, stopPolling])
+  }, [clientId, stopPolling, configurarWebhook])
 
-  // Cleanup on unmount
+  // Limpa intervalo ao desmontar o componente
   useEffect(() => () => stopPolling(), [stopPolling])
 
   async function handleConnect() {
@@ -53,7 +73,7 @@ export default function WhatsAppConnect({ clientId, initialStatus }: Props) {
     setQrBase64(null)
 
     try {
-      // Server-side route calls Evolution API — avoids HTTP/HTTPS mixed content
+      // Rota server-side chama a Evolution API — evita mixed content HTTP/HTTPS
       const res = await fetch(`/api/admin/clients/${clientId}/whatsapp/qrcode`)
       const data = await res.json()
 
@@ -63,8 +83,8 @@ export default function WhatsAppConnect({ clientId, initialStatus }: Props) {
         return
       }
 
-      // Strip any existing data URI prefix so we never duplicate it
-      const raw = data.base64 ?? null
+      // Remove prefixo data URI existente para evitar duplicação ao renderizar
+      const raw: string | null = data.base64 ?? null
       const base64 = raw
         ? raw.replace(/^data:image\/[a-z]+;base64,/, '')
         : null
@@ -74,7 +94,6 @@ export default function WhatsAppConnect({ clientId, initialStatus }: Props) {
         setStatus('awaiting_scan')
         startPolling()
       } else {
-        // No QR yet — might already be connected or pending
         setStatus('awaiting_scan')
         startPolling()
       }
@@ -98,7 +117,7 @@ export default function WhatsAppConnect({ clientId, initialStatus }: Props) {
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6 space-y-4">
-      {/* Header */}
+      {/* Cabeçalho */}
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-base font-semibold text-gray-800">Conexão WhatsApp</h2>
@@ -107,7 +126,6 @@ export default function WhatsAppConnect({ clientId, initialStatus }: Props) {
           </p>
         </div>
 
-        {/* Status badge */}
         <StatusBadge status={status} />
       </div>
 
@@ -125,9 +143,7 @@ export default function WhatsAppConnect({ clientId, initialStatus }: Props) {
                 alt="QR Code WhatsApp"
                 className="w-56 h-56 border border-gray-200 rounded-lg"
               />
-              <p className="text-xs text-gray-400">
-                Aguardando leitura do QR Code...
-              </p>
+              <p className="text-xs text-gray-400">Aguardando leitura do QR Code...</p>
             </>
           ) : (
             <div className="flex flex-col items-center gap-2 py-6">
@@ -138,26 +154,36 @@ export default function WhatsAppConnect({ clientId, initialStatus }: Props) {
         </div>
       )}
 
-      {/* Connected success */}
+      {/* Sucesso */}
       {status === 'connected' && (
         <div className="flex items-center gap-3 bg-green-50 border border-green-200 rounded-lg px-4 py-3">
-          <svg className="w-5 h-5 text-green-600 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+          <svg
+            className="w-5 h-5 text-green-600 shrink-0"
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth={2}
+              d="M5 13l4 4L19 7"
+            />
           </svg>
           <p className="text-sm font-medium text-green-700">
-            WhatsApp conectado com sucesso!
+            WhatsApp conectado e configurado com sucesso!
           </p>
         </div>
       )}
 
-      {/* Error */}
+      {/* Erro */}
       {status === 'error' && (
         <div className="bg-red-50 border border-red-200 rounded-lg px-4 py-3">
           <p className="text-sm text-red-700">{errorMsg}</p>
         </div>
       )}
 
-      {/* Actions */}
+      {/* Ações */}
       <div className="flex gap-3 pt-1">
         {status !== 'connected' && status !== 'awaiting_scan' && (
           <button
@@ -201,7 +227,7 @@ export default function WhatsAppConnect({ clientId, initialStatus }: Props) {
   )
 }
 
-// ─── Sub-components ───────────────────────────────────────────
+// ─── Subcomponentes ───────────────────────────────────────────
 
 function StatusBadge({ status }: { status: Status }) {
   const map: Record<Status, { label: string; className: string }> = {
@@ -215,13 +241,22 @@ function StatusBadge({ status }: { status: Status }) {
   const { label, className } = map[status]
 
   return (
-    <span className={`inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full ${className}`}>
-      <span className={`w-1.5 h-1.5 rounded-full ${
-        status === 'connected' ? 'bg-green-500' :
-        status === 'awaiting_scan' ? 'bg-blue-500' :
-        status === 'connecting' ? 'bg-yellow-500' :
-        status === 'error' ? 'bg-red-500' : 'bg-gray-400'
-      }`} />
+    <span
+      className={`inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full ${className}`}
+    >
+      <span
+        className={`w-1.5 h-1.5 rounded-full ${
+          status === 'connected'
+            ? 'bg-green-500'
+            : status === 'awaiting_scan'
+            ? 'bg-blue-500'
+            : status === 'connecting'
+            ? 'bg-yellow-500'
+            : status === 'error'
+            ? 'bg-red-500'
+            : 'bg-gray-400'
+        }`}
+      />
       {label}
     </span>
   )
@@ -234,8 +269,19 @@ function Spinner({ small }: { small?: boolean }) {
       fill="none"
       viewBox="0 0 24 24"
     >
-      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+      <circle
+        className="opacity-25"
+        cx="12"
+        cy="12"
+        r="10"
+        stroke="currentColor"
+        strokeWidth="4"
+      />
+      <path
+        className="opacity-75"
+        fill="currentColor"
+        d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"
+      />
     </svg>
   )
 }

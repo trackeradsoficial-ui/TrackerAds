@@ -29,7 +29,9 @@ async function requireAdmin() {
 }
 
 // GET /api/admin/clients/[id]/whatsapp/qrcode
-// Evolution API v1.8.2: QR code comes directly from GET /instance/connect/{instanceName}
+// 1. Cria instância (ignora 400/403 se já existir)
+// 2. Chama /instance/connect para gerar o QR Code
+// 3. Retorna { base64: "..." }
 export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -39,7 +41,7 @@ export async function GET(
 
   const { id } = await params
 
-  // 1. Create instance — ignore 403 if it already exists
+  // 1. Criar instância — ignora 400/403 se já existir
   const createRes = await fetch(`${EVOLUTION_URL}/instance/create`, {
     method: 'POST',
     headers: {
@@ -53,45 +55,47 @@ export async function GET(
     }),
   })
 
-  if (!createRes.ok && createRes.status !== 403) {
-    const createBody = await createRes.text()
-    console.error('Evolution create instance error:', createBody)
+  if (!createRes.ok && ![400, 403].includes(createRes.status)) {
+    const body = await createRes.text()
+    console.error('[qrcode] Erro ao criar instância:', body)
     return NextResponse.json(
-      { error: `Erro ao criar instância: ${createBody}` },
+      { error: `Erro ao criar instância: ${body}` },
       { status: 502 }
     )
   }
 
-  if (createRes.status === 403) {
-    console.log(`Instance "${id}" already exists, proceeding to connect.`)
+  if ([400, 403].includes(createRes.status)) {
+    console.log(`[qrcode] Instância "${id}" já existe, seguindo para connect.`)
   }
 
-  // 2. Connect and get QR code — v1.8.2 returns base64 directly in the response
+  // 2. Conectar — v1.8.2 retorna base64 diretamente na resposta
   const connectRes = await fetch(`${EVOLUTION_URL}/instance/connect/${id}`, {
     headers: { apikey: EVOLUTION_KEY },
   })
 
   if (!connectRes.ok) {
     const err = await connectRes.text()
-    console.error('Evolution connect error:', err)
+    console.error('[qrcode] Erro ao conectar instância:', err)
     return NextResponse.json(
-      { error: `Erro ao obter QR code: ${err}` },
+      { error: `Erro ao obter QR Code: ${err}` },
       { status: 502 }
     )
   }
 
   const connectData = await connectRes.json()
+
+  // Evolution API v1.8.2 retorna base64 na raiz da resposta
   const base64 = connectData?.base64 ?? null
 
   if (!base64) {
-    console.error('QR code base64 not found in response:', JSON.stringify(connectData))
+    console.error('[qrcode] base64 não encontrado:', JSON.stringify(connectData))
     return NextResponse.json(
       { error: 'QR Code não encontrado na resposta da Evolution API', raw: connectData },
       { status: 502 }
     )
   }
 
-  // Update status to "connecting" in Supabase
+  // Atualiza status para "connecting" no Supabase
   await serviceClient()
     .from('clients')
     .update({ whatsapp_status: 'connecting' })
