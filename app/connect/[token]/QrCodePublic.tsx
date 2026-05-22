@@ -3,12 +3,12 @@
 import { useState, useEffect, useRef } from 'react'
 
 interface Props {
-  clientId: string
+  token: string
 }
 
 type Estado = 'idle' | 'carregando' | 'aguardando' | 'conectado' | 'erro'
 
-export default function QrCodePublic({ clientId }: Props) {
+export default function QrCodePublic({ token }: Props) {
   const [estado, setEstado] = useState<Estado>('idle')
   const [base64, setBase64] = useState<string | null>(null)
   const [erro, setErro] = useState('')
@@ -27,7 +27,8 @@ export default function QrCodePublic({ clientId }: Props) {
     pararPolling()
     pollRef.current = setInterval(async () => {
       try {
-        const res = await fetch(`/api/admin/clients/${clientId}/whatsapp/status`)
+        // Usa a rota pública — não requer autenticação
+        const res = await fetch(`/api/connect/${token}/status`)
         if (!res.ok) return
         const data = await res.json()
         if (data.state === 'open') {
@@ -36,7 +37,7 @@ export default function QrCodePublic({ clientId }: Props) {
           setBase64(null)
         }
       } catch {
-        // ignora erros transientes
+        // Ignora erros transientes de rede
       }
     }, 3000)
   }
@@ -47,7 +48,8 @@ export default function QrCodePublic({ clientId }: Props) {
     setBase64(null)
 
     try {
-      const res = await fetch(`/api/admin/clients/${clientId}/whatsapp/qrcode`)
+      // Usa a rota pública — não requer autenticação
+      const res = await fetch(`/api/connect/${token}/qrcode`)
       const data = await res.json()
 
       if (!res.ok) {

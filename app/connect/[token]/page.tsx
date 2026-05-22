@@ -46,8 +46,8 @@ export default async function ConnectPage({ params }: Props) {
           </p>
         </div>
 
-        {/* QR Code interativo — componente client-side */}
-        <QrCodePublic clientId={client.id} />
+        {/* QR Code interativo — componente client-side (usa token, sem autenticação) */}
+        <QrCodePublic token={token} />
       </div>
     </main>
   )
