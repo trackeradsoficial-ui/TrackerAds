@@ -63,7 +63,11 @@ export default function WhatsAppConnect({ clientId, initialStatus }: Props) {
         return
       }
 
-      const base64 = data.base64 ?? null
+      // Strip any existing data URI prefix so we never duplicate it
+      const raw = data.base64 ?? null
+      const base64 = raw
+        ? raw.replace(/^data:image\/[a-z]+;base64,/, '')
+        : null
 
       if (base64) {
         setQrBase64(base64)
