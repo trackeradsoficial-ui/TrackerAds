@@ -2,11 +2,9 @@
 
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { createClient } from '@/lib/supabase/client'
 
 export default function NewClientPage() {
   const router = useRouter()
-  const supabase = createClient()
 
   const [form, setForm] = useState({
     company_name: '',
@@ -23,7 +21,7 @@ export default function NewClientPage() {
     setForm((prev) => ({ ...prev, [e.target.name]: e.target.value }))
   }
 
-  async function handleSubmit(e: React.FormEvent) {
+  async function handleSubmit(e: React.SyntheticEvent<HTMLFormElement>) {
     e.preventDefault()
     setError('')
     setLoading(true)
@@ -42,7 +40,8 @@ export default function NewClientPage() {
         return
       }
 
-      router.push('/admin')
+      // Redirect to client edit page so WhatsApp can be connected immediately
+      router.push(`/admin/clients/${json.client.id}`)
       router.refresh()
     } catch {
       setError('Erro de conexão. Tente novamente.')

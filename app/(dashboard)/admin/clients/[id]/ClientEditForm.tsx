@@ -2,6 +2,7 @@
 
 import { useState } from 'react'
 import type { Client } from '@/types'
+import WhatsAppConnect from '@/components/whatsapp/WhatsAppConnect'
 
 export default function ClientEditForm({ client }: { client: Client }) {
   const [form, setForm] = useState({
@@ -22,7 +23,7 @@ export default function ClientEditForm({ client }: { client: Client }) {
     setForm((prev) => ({ ...prev, [name]: type === 'checkbox' ? checked : value }))
   }
 
-  async function handleSave(e: React.FormEvent) {
+  async function handleSave(e: React.SyntheticEvent<HTMLFormElement>) {
     e.preventDefault()
     setSaving(true)
     setSaveMsg('')
@@ -101,6 +102,12 @@ export default function ClientEditForm({ client }: { client: Client }) {
           )}
         </div>
       </form>
+
+      {/* WhatsApp connection — always visible for existing clients */}
+      <WhatsAppConnect
+        clientId={client.id}
+        initialStatus={client.whatsapp_status ?? 'disconnected'}
+      />
 
       {/* Test CAPI section */}
       <div className="bg-white rounded-xl border border-gray-200 p-6 space-y-4">

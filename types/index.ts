@@ -15,6 +15,7 @@ export interface Client {
   pixel_id: string
   capi_token: string
   is_active: boolean
+  whatsapp_status: 'connected' | 'disconnected' | 'connecting'
   created_at: string
 }
 
