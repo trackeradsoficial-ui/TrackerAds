@@ -11,6 +11,7 @@ export default function ClientEditForm({ client }: { client: Client }) {
     pixel_id: client.pixel_id,
     capi_token: client.capi_token,
     is_active: client.is_active,
+    conversion_label: client.conversion_label ?? 'Comprou',
   })
   const [saving, setSaving] = useState(false)
   const [saveMsg, setSaveMsg] = useState('')
@@ -74,6 +75,16 @@ export default function ClientEditForm({ client }: { client: Client }) {
           <Field label="Número do WhatsApp" name="whatsapp_number" value={form.whatsapp_number} onChange={handleChange} required />
           <Field label="Pixel ID" name="pixel_id" value={form.pixel_id} onChange={handleChange} required />
           <Field label="CAPI Access Token" name="capi_token" value={form.capi_token} onChange={handleChange} required />
+          <div className="col-span-2">
+            <Field
+              label="Etiqueta de Conversão"
+              name="conversion_label"
+              value={form.conversion_label}
+              onChange={handleChange}
+              required
+              hint='Etiqueta do WhatsApp que dispara o evento Purchase no Facebook. Padrão: "Comprou". A comparação ignora maiúsculas e minúsculas.'
+            />
+          </div>
         </div>
 
         <label className="flex items-center gap-2 cursor-pointer">
@@ -156,6 +167,7 @@ function Field({
   onChange,
   type = 'text',
   required,
+  hint,
 }: {
   label: string
   name: string
@@ -163,6 +175,7 @@ function Field({
   onChange: (e: React.ChangeEvent<HTMLInputElement>) => void
   type?: string
   required?: boolean
+  hint?: string
 }) {
   return (
     <div>
@@ -175,6 +188,7 @@ function Field({
         required={required}
         className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
       />
+      {hint && <p className="mt-1 text-xs text-gray-400">{hint}</p>}
     </div>
   )
 }

@@ -48,19 +48,6 @@ export async function POST(req: NextRequest) {
     for (const chat of chats) {
       const c = chat as Record<string, unknown>
 
-      // Verifica se a etiqueta "Comprou" está presente
-      const labels: unknown[] = Array.isArray(c?.labels) ? (c.labels as unknown[]) : []
-      const temComprou = labels.some(
-        (l) =>
-          (typeof l === 'string' && l.toLowerCase().trim() === 'comprou') ||
-          (typeof l === 'object' &&
-            l !== null &&
-            typeof (l as Record<string, unknown>).name === 'string' &&
-            ((l as Record<string, unknown>).name as string).toLowerCase().trim() === 'comprou')
-      )
-
-      if (!temComprou) continue
-
       // JID do contato: "5511999999999@s.whatsapp.net"
       const remoteJid: string =
         (c?.id as string) ?? (c?.remoteJid as string) ?? ''
@@ -75,9 +62,10 @@ export async function POST(req: NextRequest) {
       const supabase = getServiceClient()
 
       // Busca o cliente pelo número da instância ou pelo número do WhatsApp
+      // Inclui conversion_label para comparar com as etiquetas recebidas
       const { data: client, error: clientError } = await supabase
         .from('clients')
-        .select('id, pixel_id, capi_token, whatsapp_number, is_active')
+        .select('id, pixel_id, capi_token, whatsapp_number, is_active, conversion_label')
         .or(
           `whatsapp_number.eq.${phoneRaw},whatsapp_number.eq.${instanceName}`
         )
@@ -94,16 +82,31 @@ export async function POST(req: NextRequest) {
         continue
       }
 
+      // Etiqueta configurada pelo admin (padrão: "Comprou") — comparação case-insensitive
+      const labelEsperada = (client.conversion_label ?? 'Comprou').toLowerCase().trim()
+
+      const labels: unknown[] = Array.isArray(c?.labels) ? (c.labels as unknown[]) : []
+      const temConversao = labels.some(
+        (l) =>
+          (typeof l === 'string' && l.toLowerCase().trim() === labelEsperada) ||
+          (typeof l === 'object' &&
+            l !== null &&
+            typeof (l as Record<string, unknown>).name === 'string' &&
+            ((l as Record<string, unknown>).name as string).toLowerCase().trim() === labelEsperada)
+      )
+
+      if (!temConversao) continue
+
       const phoneHashed = hashPhone(phoneRaw)
 
-      // Salva lead no Supabase
+      // Salva lead no Supabase com a etiqueta que disparou a conversão
       const { data: lead, error: leadError } = await supabase
         .from('leads')
         .insert({
           client_id: client.id,
           phone_raw: phoneRaw,
           phone_hashed: phoneHashed,
-          label: 'Comprou',
+          label: client.conversion_label ?? 'Comprou',
           status: 'converted',
           facebook_event_sent: false,
         })

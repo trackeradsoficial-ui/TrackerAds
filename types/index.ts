@@ -16,6 +16,7 @@ export interface Client {
   capi_token: string
   is_active: boolean
   whatsapp_status: 'connected' | 'disconnected' | 'connecting'
+  conversion_label: string
   created_at: string
 }
 
