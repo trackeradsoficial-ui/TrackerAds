@@ -53,10 +53,10 @@ export async function GET(
   const isOpen = state === 'open'
 
   if (isOpen) {
-    // Update Supabase to connected
+    // Salva status + instância para identificação correta no webhook
     await serviceClient()
       .from('clients')
-      .update({ whatsapp_status: 'connected' })
+      .update({ whatsapp_status: 'connected', whatsapp_instance: id })
       .eq('id', id)
   }
 

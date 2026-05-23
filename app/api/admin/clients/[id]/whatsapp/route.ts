@@ -99,10 +99,10 @@ export async function POST(
     const isOpen = state === 'open'
 
     if (isOpen) {
-      // Update Supabase to connected
+      // Salva status + instância para identificação correta no webhook
       await serviceClient()
         .from('clients')
-        .update({ whatsapp_status: 'connected' })
+        .update({ whatsapp_status: 'connected', whatsapp_instance: id })
         .eq('id', id)
     }
 
@@ -117,7 +117,7 @@ export async function POST(
 
     await serviceClient()
       .from('clients')
-      .update({ whatsapp_status: 'disconnected' })
+      .update({ whatsapp_status: 'disconnected', whatsapp_instance: null })
       .eq('id', id)
 
     return NextResponse.json({ ok: true })
