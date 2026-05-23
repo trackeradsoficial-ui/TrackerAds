@@ -42,7 +42,9 @@ export async function POST(
       url: `${APP_URL}/api/webhooks/whatsapp`,
       webhook_by_events: false,
       webhook_base64: false,
-      events: ['CHATS_UPDATE'],
+      // CONTACTS_UPSERT: salva nome+telefone para enriquecer o evento CAPI (fn/ln)
+      // CHATS_UPDATE:    detecta etiqueta de conversão e dispara Purchase no Facebook
+      events: ['CHATS_UPDATE', 'CONTACTS_UPSERT'],
     }),
   })
 

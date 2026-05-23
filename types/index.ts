@@ -55,7 +55,9 @@ export interface EvolutionEventData {
 
 // Facebook CAPI shapes
 export interface CapiUserData {
-  ph: string[] // hashed phones
+  ph:  string[]   // telefone(s) hasheado(s) com SHA-256
+  fn?: string[]   // primeiro nome hasheado com SHA-256
+  ln?: string[]   // último nome hasheado com SHA-256
   client_ip_address?: string
   client_user_agent?: string
   fbc?: string
