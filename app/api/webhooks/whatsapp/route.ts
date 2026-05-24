@@ -25,6 +25,33 @@ export async function GET(req: NextRequest) {
 //   • CHATS_UPDATE    — detecta etiqueta de conversão e dispara evento CAPI
 // ─────────────────────────────────────────────────────────────────────────────
 export async function POST(req: NextRequest) {
+  // ── Lê e loga o payload bruto antes de qualquer processamento ────────────
+  let rawText = ''
+  let body: Record<string, unknown> = {}
+
+  try {
+    rawText = await req.text()
+    console.log('[webhook] ✉️  Payload bruto recebido:\n' + rawText)
+  } catch (readErr) {
+    console.error('[webhook] 💥 Falha ao ler o corpo da requisição:', readErr)
+    return NextResponse.json(
+      { error: 'Não foi possível ler o corpo da requisição', detalhe: String(readErr) },
+      { status: 400 }
+    )
+  }
+
+  // ── Parse do JSON ─────────────────────────────────────────────────────────
+  try {
+    body = JSON.parse(rawText)
+  } catch (parseErr) {
+    console.error('[webhook] 💥 Payload não é JSON válido:', parseErr)
+    return NextResponse.json(
+      { error: 'Payload inválido — esperado JSON', detalhe: String(parseErr), payload: rawText.slice(0, 500) },
+      { status: 400 }
+    )
+  }
+
+  // ── Verificação de segredo ────────────────────────────────────────────────
   try {
     const secret = process.env.WEBHOOK_SECRET
     if (secret) {
@@ -35,14 +62,21 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: 'Não autorizado' }, { status: 401 })
       }
     }
+  } catch (authErr) {
+    console.error('[webhook] 💥 Erro na verificação de segredo:', authErr)
+    return NextResponse.json(
+      { error: 'Erro na verificação de segredo', detalhe: String(authErr) },
+      { status: 500 }
+    )
+  }
 
-    const body = await req.json()
-    console.log('[webhook] ✉️  Payload recebido:', JSON.stringify(body, null, 2))
-
-    const event: string = body?.event ?? body?.type ?? ''
+  // ── Roteamento do evento ──────────────────────────────────────────────────
+  try {
+    const event: string = (body?.event as string) ?? (body?.type as string) ?? ''
     const data = body?.data ?? body
 
-    console.log(`[webhook] 📌 Evento: "${event}"`)
+    console.log(`[webhook] 📌 Evento detectado: "${event}"`)
+    console.log('[webhook] 📦 Body parseado:', JSON.stringify(body, null, 2))
 
     if (event === 'CONTACTS_UPSERT' || event === 'contacts.upsert') {
       return await handleContactsUpsert(body, data)
@@ -56,8 +90,21 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: true, ignorado: true, event })
 
   } catch (err) {
-    console.error('[webhook] 💥 Erro interno:', err)
-    return NextResponse.json({ error: 'Erro interno do servidor' }, { status: 500 })
+    const mensagem = err instanceof Error ? err.message : String(err)
+    const stack    = err instanceof Error ? err.stack   : undefined
+
+    console.error('[webhook] 💥 Erro interno no roteamento:', err)
+    console.error('[webhook] Stack:', stack)
+
+    return NextResponse.json(
+      {
+        error:   'Erro interno do servidor',
+        detalhe: mensagem,
+        stack:   stack ?? null,
+        evento:  (body?.event as string) ?? (body?.type as string) ?? '(desconhecido)',
+      },
+      { status: 500 }
+    )
   }
 }
 
@@ -90,7 +137,7 @@ async function findClient(
   // ── Etapa 1: busca flexível por whatsapp_number ───────────────────────────
   // Monta lista de sufixos em ordem decrescente de especificidade.
   // Ex.: ownerPhone = "5519982250102"
-  //   → suffixes = ["5519982250102", "19982250102", "9982250102"]
+  //   → suffixes = ["5519982250102", "19982250102", "1982250102"]
   if (ownerPhone.length >= 8) {
     const suffixes: string[] = [ownerPhone]
 
@@ -98,7 +145,7 @@ async function findClient(
     if (ownerPhone.startsWith('55') && ownerPhone.length === 13) {
       const semDDI = ownerPhone.slice(2)        // "19982250102"
       suffixes.push(semDDI)
-      // Remove também o nono dígito caso o banco tenha número de 8 dígitos
+      // Remove também o nono dígito caso o banco tenha número antigo de 10 dígitos
       if (semDDI.length === 11) {
         suffixes.push(semDDI.slice(0, 2) + semDDI.slice(3)) // "1982250102"
       }
@@ -201,70 +248,85 @@ async function handleContactsUpsert(
   body: Record<string, unknown>,
   data: unknown
 ): Promise<NextResponse> {
-  const instanceId: string =
-    (body?.instance as string) ?? (body?.instanceName as string) ?? ''
+  try {
+    const instanceId: string =
+      (body?.instance as string) ?? (body?.instanceName as string) ?? ''
 
-  // owner pode estar no primeiro item do array ou no body
-  const items: unknown[] = Array.isArray(data) ? data : [data]
-  const firstItem = items[0] as Record<string, unknown> | undefined
-  const ownerJid: string =
-    (body?.sender as string) ??
-    (firstItem?.owner as string) ??
-    ''
-
-  console.log(
-    `[webhook/contacts] 👥 CONTACTS_UPSERT — instance="${instanceId}" | owner="${ownerJid}" | ${items.length} contato(s)`
-  )
-
-  const supabase = getServiceClient()
-  const client   = await findClient(supabase, instanceId, ownerJid)
-
-  if (!client) {
-    console.warn('[webhook/contacts] ⚠️  Cliente não identificado — ignorando')
-    return NextResponse.json({ ok: true, ignorado: true })
-  }
-
-  let salvos = 0
-  let erros  = 0
-
-  for (const item of items) {
-    const c = item as Record<string, unknown>
-
-    const jid: string = (c?.id as string) ?? (c?.remoteJid as string) ?? ''
-
-    // Ignora grupos e broadcasts
-    if (!jid || jid.includes('@g.us') || jid.includes('@broadcast')) continue
-
-    const phone = jid.split('@')[0].replace(/\D/g, '')
-    if (!phone) continue
-
-    const name: string =
-      (c?.pushName       as string) ??
-      (c?.name           as string) ??
-      (c?.verifiedName   as string) ??
+    // owner pode estar no primeiro item do array ou no body
+    const items: unknown[] = Array.isArray(data) ? data : (data != null ? [data] : [])
+    const firstItem = items[0] as Record<string, unknown> | undefined
+    const ownerJid: string =
+      (body?.sender as string) ??
+      (firstItem?.owner as string) ??
       ''
 
     console.log(
-      `[webhook/contacts] 💾 Upsert: phone="${phone}" name="${name}"`
+      `[webhook/contacts] 👥 CONTACTS_UPSERT — instance="${instanceId}" | owner="${ownerJid}" | ${items.length} contato(s)`
     )
 
-    const { error } = await supabase
-      .from('contacts')
-      .upsert(
-        { client_id: client.id, phone, name: name || null },
-        { onConflict: 'client_id,phone', ignoreDuplicates: false }
-      )
+    const supabase = getServiceClient()
+    const client   = await findClient(supabase, instanceId, ownerJid)
 
-    if (error) {
-      console.error(`[webhook/contacts] ❌ Erro "${phone}":`, error.message)
-      erros++
-    } else {
-      salvos++
+    if (!client) {
+      console.warn('[webhook/contacts] ⚠️  Cliente não identificado — ignorando')
+      return NextResponse.json({ ok: true, ignorado: true })
     }
-  }
 
-  console.log(`[webhook/contacts] ✅ salvos=${salvos} erros=${erros}`)
-  return NextResponse.json({ ok: true, salvos, erros })
+    let salvos = 0
+    let erros  = 0
+
+    for (const item of items) {
+      try {
+        const c = item as Record<string, unknown>
+
+        const jid: string = (c?.id as string) ?? (c?.remoteJid as string) ?? ''
+
+        // Ignora grupos e broadcasts
+        if (!jid || jid.includes('@g.us') || jid.includes('@broadcast')) continue
+
+        const phone = jid.split('@')[0].replace(/\D/g, '')
+        if (!phone) continue
+
+        const name: string =
+          (c?.pushName       as string) ??
+          (c?.name           as string) ??
+          (c?.verifiedName   as string) ??
+          ''
+
+        console.log(
+          `[webhook/contacts] 💾 Upsert: phone="${phone}" name="${name}"`
+        )
+
+        const { error } = await supabase
+          .from('contacts')
+          .upsert(
+            { client_id: client.id, phone, name: name || null },
+            { onConflict: 'client_id,phone', ignoreDuplicates: false }
+          )
+
+        if (error) {
+          console.error(`[webhook/contacts] ❌ Erro "${phone}":`, error.message)
+          erros++
+        } else {
+          salvos++
+        }
+      } catch (itemErr) {
+        console.error('[webhook/contacts] ❌ Exceção ao processar contato:', itemErr)
+        erros++
+      }
+    }
+
+    console.log(`[webhook/contacts] ✅ salvos=${salvos} erros=${erros}`)
+    return NextResponse.json({ ok: true, salvos, erros })
+
+  } catch (err) {
+    const mensagem = err instanceof Error ? err.message : String(err)
+    console.error('[webhook/contacts] 💥 Erro inesperado em handleContactsUpsert:', err)
+    return NextResponse.json(
+      { error: 'Erro ao processar CONTACTS_UPSERT', detalhe: mensagem },
+      { status: 500 }
+    )
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -276,160 +338,202 @@ async function handleChatsUpdate(
   body: Record<string, unknown>,
   data: unknown
 ): Promise<NextResponse> {
-  const instanceId: string =
-    (body?.instance as string) ?? (body?.instanceName as string) ?? ''
+  try {
+    const instanceId: string =
+      (body?.instance as string) ?? (body?.instanceName as string) ?? ''
 
-  const chats: unknown[] = Array.isArray(data) ? data : [data]
-
-  console.log(
-    `[webhook/chats] 🔄 CHATS_UPDATE — instance="${instanceId}" | ${chats.length} chat(s)`
-  )
-
-  for (const [idx, chat] of chats.entries()) {
-    const c = chat as Record<string, unknown>
+    // Garante que data é sempre um array, independente do que vier no payload
+    const chats: unknown[] = Array.isArray(data)
+      ? data
+      : (data != null ? [data] : [])
 
     console.log(
-      `[webhook/chats] 📋 Chat [${idx + 1}/${chats.length}]:`,
-      JSON.stringify(c, null, 2)
+      `[webhook/chats] 🔄 CHATS_UPDATE — instance="${instanceId}" | ${chats.length} chat(s)`
     )
 
-    // JID do contato que será convertido
-    const remoteJid: string =
-      (c?.id as string) ?? (c?.remoteJid as string) ?? ''
-
-    if (!remoteJid || remoteJid.includes('@g.us')) {
-      console.warn(`[webhook/chats] ⚠️  Chat [${idx + 1}] sem JID válido — ignorando`)
-      continue
+    if (chats.length === 0) {
+      console.warn('[webhook/chats] ⚠️  Nenhum chat no payload — ignorando')
+      return NextResponse.json({ ok: true, ignorado: true, motivo: 'sem chats no payload' })
     }
 
-    // owner identifica de qual instância/número de WhatsApp veio o evento
-    const ownerJid: string =
-      (c?.owner as string) ??
-      (body?.sender as string) ??
-      ''
+    const resultados: Array<{ chat: string; resultado: string }> = []
 
-    const phoneRaw = remoteJid.split('@')[0]
-    console.log(
-      `[webhook/chats] 📱 remoteJid="${remoteJid}" | phoneRaw="${phoneRaw}" | owner="${ownerJid}"`
-    )
+    for (const [idx, chat] of chats.entries()) {
+      try {
+        const c = chat as Record<string, unknown>
 
-    const supabase = getServiceClient()
-    const client   = await findClient(supabase, instanceId, ownerJid)
+        console.log(
+          `[webhook/chats] 📋 Processando chat [${idx + 1}/${chats.length}]:`,
+          JSON.stringify(c, null, 2)
+        )
 
-    if (!client) continue
+        // JID do contato que será convertido
+        const remoteJid: string =
+          (c?.id as string) ?? (c?.remoteJid as string) ?? ''
 
-    console.log(
-      `[webhook/chats] 🎯 Etiqueta esperada: "${client.conversion_label ?? 'Comprou'}"`
-    )
+        if (!remoteJid || remoteJid.includes('@g.us')) {
+          console.warn(`[webhook/chats] ⚠️  Chat [${idx + 1}] sem JID válido ("${remoteJid}") — ignorando`)
+          resultados.push({ chat: remoteJid || `[${idx + 1}]`, resultado: 'ignorado — sem JID válido' })
+          continue
+        }
 
-    // ── Verifica etiqueta de conversão ────────────────────────────────────
-    const labelEsperada = (client.conversion_label ?? 'Comprou').toLowerCase().trim()
-    const labels: unknown[] = Array.isArray(c?.labels) ? (c.labels as unknown[]) : []
+        // owner: tenta no item do chat primeiro, depois no body (sender), depois no instanceId
+        const ownerJid: string =
+          (c?.owner  as string) ??
+          (body?.sender as string) ??
+          ''
 
-    const labelsNormalizadas = labels.map((l) =>
-      typeof l === 'string'
-        ? l
-        : typeof (l as Record<string, unknown>)?.name === 'string'
-          ? (l as Record<string, unknown>).name as string
-          : JSON.stringify(l)
-    )
+        const phoneRaw = remoteJid.split('@')[0]
+        console.log(
+          `[webhook/chats] 📱 remoteJid="${remoteJid}" | phoneRaw="${phoneRaw}" | ownerJid="${ownerJid}"`
+        )
 
-    console.log(`[webhook/chats] 🏷️  Etiquetas: ${JSON.stringify(labelsNormalizadas)}`)
+        const supabase = getServiceClient()
+        const client   = await findClient(supabase, instanceId, ownerJid)
 
-    const temConversao = labels.some(
-      (l) =>
-        (typeof l === 'string' && l.toLowerCase().trim() === labelEsperada) ||
-        (typeof l === 'object' &&
-          l !== null &&
-          typeof (l as Record<string, unknown>).name === 'string' &&
-          ((l as Record<string, unknown>).name as string).toLowerCase().trim() === labelEsperada)
-    )
+        if (!client) {
+          console.warn(`[webhook/chats] ⚠️  Chat [${idx + 1}] — cliente não identificado — ignorando`)
+          resultados.push({ chat: remoteJid, resultado: 'ignorado — cliente não encontrado' })
+          continue
+        }
 
-    if (!temConversao) {
-      console.log(`[webhook/chats] ⏭️  Etiqueta "${labelEsperada}" não detectada — ignorando`)
-      continue
-    }
+        console.log(
+          `[webhook/chats] 🎯 Etiqueta esperada: "${client.conversion_label ?? 'Comprou'}"`
+        )
 
-    console.log(`[webhook/chats] 🎉 Etiqueta "${labelEsperada}" DETECTADA!`)
+        // ── Verifica etiqueta de conversão ──────────────────────────────────
+        const labelEsperada = (client.conversion_label ?? 'Comprou').toLowerCase().trim()
 
-    // ── Busca nome do contato ─────────────────────────────────────────────
-    const phoneNormalizado = phoneRaw.replace(/\D/g, '')
+        // labels pode ser array de strings ou array de objetos { name: string }
+        const labelsRaw: unknown[] = Array.isArray(c?.labels)
+          ? (c.labels as unknown[])
+          : []
 
-    const { data: contactRow } = await supabase
-      .from('contacts')
-      .select('name')
-      .eq('client_id', client.id)
-      .eq('phone', phoneNormalizado)
-      .maybeSingle()
+        const labelsNormalizadas: string[] = labelsRaw.map((l) => {
+          if (typeof l === 'string') return l
+          if (l !== null && typeof l === 'object') {
+            const obj = l as Record<string, unknown>
+            if (typeof obj.name === 'string') return obj.name
+          }
+          return JSON.stringify(l)
+        })
 
-    const nomeCompleto: string = contactRow?.name ?? ''
-    console.log(
-      `[webhook/chats] 👤 Nome do contato: "${nomeCompleto || '(não encontrado)'}"`
-    )
+        console.log(
+          `[webhook/chats] 🏷️  Etiquetas recebidas: ${JSON.stringify(labelsNormalizadas)} | Esperada: "${labelEsperada}"`
+        )
 
-    // ── Monta dados para o CAPI ───────────────────────────────────────────
-    const phoneHashed = hashPhone(phoneRaw)
-    const capiContact: CapiContactData = { phoneHashed }
+        const temConversao = labelsNormalizadas.some(
+          (label) => label.toLowerCase().trim() === labelEsperada
+        )
 
-    if (nomeCompleto) {
-      const { firstName, lastName } = splitName(nomeCompleto)
-      if (firstName) {
-        capiContact.firstNameHashed = hashName(firstName)
-        console.log(`[webhook/chats] 🔐 fn="${firstName}" → ${capiContact.firstNameHashed}`)
+        if (!temConversao) {
+          console.log(
+            `[webhook/chats] ⏭️  Etiqueta "${labelEsperada}" não detectada em [${labelsNormalizadas.join(', ')}] — ignorando`
+          )
+          resultados.push({ chat: remoteJid, resultado: `ignorado — etiqueta "${labelEsperada}" não presente` })
+          continue
+        }
+
+        console.log(`[webhook/chats] 🎉 Etiqueta "${labelEsperada}" DETECTADA!`)
+
+        // ── Busca nome do contato ───────────────────────────────────────────
+        const phoneNormalizado = phoneRaw.replace(/\D/g, '')
+
+        const { data: contactRow } = await supabase
+          .from('contacts')
+          .select('name')
+          .eq('client_id', client.id)
+          .eq('phone', phoneNormalizado)
+          .maybeSingle()
+
+        const nomeCompleto: string = contactRow?.name ?? ''
+        console.log(
+          `[webhook/chats] 👤 Nome do contato: "${nomeCompleto || '(não encontrado)'}"`
+        )
+
+        // ── Monta dados para o CAPI ─────────────────────────────────────────
+        const phoneHashed = hashPhone(phoneRaw)
+        const capiContact: CapiContactData = { phoneHashed }
+
+        if (nomeCompleto) {
+          const { firstName, lastName } = splitName(nomeCompleto)
+          if (firstName) {
+            capiContact.firstNameHashed = hashName(firstName)
+            console.log(`[webhook/chats] 🔐 fn="${firstName}" → ${capiContact.firstNameHashed}`)
+          }
+          if (lastName) {
+            capiContact.lastNameHashed = hashName(lastName)
+            console.log(`[webhook/chats] 🔐 ln="${lastName}" → ${capiContact.lastNameHashed}`)
+          }
+        }
+
+        // ── Salva lead ──────────────────────────────────────────────────────
+        const { data: lead, error: leadError } = await supabase
+          .from('leads')
+          .insert({
+            client_id:           client.id,
+            phone_raw:           phoneRaw,
+            phone_hashed:        phoneHashed,
+            label:               client.conversion_label ?? 'Comprou',
+            status:              'converted' as const,
+            facebook_event_sent: false,
+          })
+          .select()
+          .single()
+
+        if (leadError || !lead) {
+          console.error('[webhook/chats] ❌ Erro ao salvar lead:', leadError?.message ?? 'retorno nulo')
+          resultados.push({ chat: remoteJid, resultado: `erro ao salvar lead: ${leadError?.message ?? 'retorno nulo'}` })
+          continue
+        }
+
+        console.log(`[webhook/chats] ✅ Lead salvo: id="${lead.id}"`)
+
+        // ── Dispara evento Purchase no Facebook CAPI ────────────────────────
+        console.log(
+          `[webhook/chats] 📡 Disparando CAPI — pixel="${client.pixel_id}"` +
+          (capiContact.firstNameHashed ? ' +fn' : '') +
+          (capiContact.lastNameHashed  ? ' +ln' : '')
+        )
+
+        const { success, response: capiResponse } = await sendCapiEvent(
+          client.pixel_id,
+          client.capi_token,
+          phoneHashed,
+          undefined,
+          capiContact
+        )
+
+        console.log(
+          `[webhook/chats] ${success ? '✅' : '❌'} CAPI: sucesso=${success} | ${JSON.stringify(capiResponse)}`
+        )
+
+        await supabase
+          .from('leads')
+          .update({ facebook_event_sent: success, facebook_event_response: capiResponse })
+          .eq('id', lead.id)
+
+        console.log(`[webhook/chats] 🏁 Lead "${lead.id}" finalizado`)
+        resultados.push({ chat: remoteJid, resultado: `lead=${lead.id} | capi=${success ? 'enviado' : 'falhou'}` })
+
+      } catch (chatErr) {
+        const mensagem = chatErr instanceof Error ? chatErr.message : String(chatErr)
+        console.error(`[webhook/chats] 💥 Exceção no chat [${idx + 1}]:`, chatErr)
+        resultados.push({ chat: `[${idx + 1}]`, resultado: `exceção: ${mensagem}` })
+        // continua processando os próximos chats
       }
-      if (lastName) {
-        capiContact.lastNameHashed = hashName(lastName)
-        console.log(`[webhook/chats] 🔐 ln="${lastName}" → ${capiContact.lastNameHashed}`)
-      }
     }
 
-    // ── Salva lead ────────────────────────────────────────────────────────
-    const { data: lead, error: leadError } = await supabase
-      .from('leads')
-      .insert({
-        client_id:           client.id,
-        phone_raw:           phoneRaw,
-        phone_hashed:        phoneHashed,
-        label:               client.conversion_label ?? 'Comprou',
-        status:              'converted' as const,
-        facebook_event_sent: false,
-      })
-      .select()
-      .single()
+    console.log('[webhook/chats] 📊 Resumo:', JSON.stringify(resultados))
+    return NextResponse.json({ ok: true, resultados })
 
-    if (leadError || !lead) {
-      console.error('[webhook/chats] ❌ Erro ao salvar lead:', leadError)
-      continue
-    }
-
-    console.log(`[webhook/chats] ✅ Lead salvo: id="${lead.id}"`)
-
-    // ── Dispara evento Purchase no Facebook CAPI ──────────────────────────
-    console.log(
-      `[webhook/chats] 📡 Disparando CAPI — pixel="${client.pixel_id}"` +
-      (capiContact.firstNameHashed ? ' +fn' : '') +
-      (capiContact.lastNameHashed  ? ' +ln' : '')
+  } catch (err) {
+    const mensagem = err instanceof Error ? err.message : String(err)
+    const stack    = err instanceof Error ? err.stack   : undefined
+    console.error('[webhook/chats] 💥 Erro inesperado em handleChatsUpdate:', err)
+    return NextResponse.json(
+      { error: 'Erro ao processar CHATS_UPDATE', detalhe: mensagem, stack: stack ?? null },
+      { status: 500 }
     )
-
-    const { success, response: capiResponse } = await sendCapiEvent(
-      client.pixel_id,
-      client.capi_token,
-      phoneHashed,
-      undefined,
-      capiContact
-    )
-
-    console.log(
-      `[webhook/chats] ${success ? '✅' : '❌'} CAPI: sucesso=${success} | ${JSON.stringify(capiResponse)}`
-    )
-
-    await supabase
-      .from('leads')
-      .update({ facebook_event_sent: success, facebook_event_response: capiResponse })
-      .eq('id', lead.id)
-
-    console.log(`[webhook/chats] 🏁 Lead "${lead.id}" finalizado`)
   }
-
-  return NextResponse.json({ ok: true })
 }
