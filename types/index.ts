@@ -16,7 +16,8 @@ export interface Client {
   capi_token: string
   is_active: boolean
   whatsapp_status: 'connected' | 'disconnected' | 'connecting'
-  conversion_label: string
+  conversion_label:    string
+  conversion_label_id: string | null   // ID numérico da etiqueta (ex: "4"); usado no labels.association
   created_at: string
 }
 

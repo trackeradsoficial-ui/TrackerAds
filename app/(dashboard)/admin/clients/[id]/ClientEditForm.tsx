@@ -15,12 +15,13 @@ import {
 
 export default function ClientEditForm({ client }: { client: Client }) {
   const [form, setForm] = useState({
-    company_name:     client.company_name,
-    whatsapp_number:  client.whatsapp_number,
-    pixel_id:         client.pixel_id,
-    capi_token:       client.capi_token,
-    is_active:        client.is_active,
-    conversion_label: client.conversion_label ?? 'Comprou',
+    company_name:        client.company_name,
+    whatsapp_number:     client.whatsapp_number,
+    pixel_id:            client.pixel_id,
+    capi_token:          client.capi_token,
+    is_active:           client.is_active,
+    conversion_label:    client.conversion_label ?? 'Comprou',
+    conversion_label_id: client.conversion_label_id ?? '',
   })
   const [saving,      setSaving]      = useState(false)
   const [saveMsg,     setSaveMsg]     = useState('')
@@ -171,14 +172,23 @@ export default function ClientEditForm({ client }: { client: Client }) {
             </div>
           </div>
 
-          <Field
-            label="Etiqueta de Conversão"
-            name="conversion_label"
-            value={form.conversion_label}
-            onChange={handleChange}
-            required
-            hint='Etiqueta do WhatsApp que dispara o evento Purchase no Facebook. Padrão: "Comprou". Comparação ignora maiúsculas.'
-          />
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <Field
+              label="Etiqueta de Conversão"
+              name="conversion_label"
+              value={form.conversion_label}
+              onChange={handleChange}
+              required
+              hint='Nome da etiqueta do WhatsApp que dispara o Purchase. Padrão: "Comprou". Ignorado no labels.association se o ID estiver preenchido.'
+            />
+            <Field
+              label="ID da Etiqueta (WhatsApp Business)"
+              name="conversion_label_id"
+              value={form.conversion_label_id}
+              onChange={handleChange}
+              hint='ID numérico da etiqueta (ex: "4"). Usado para comparação no evento labels.association. Deixe vazio para usar o nome acima.'
+            />
+          </div>
 
           {/* Active toggle */}
           <label className="flex items-center gap-3 cursor-pointer group">

@@ -84,76 +84,6 @@ async function sendCapiEvent(opts: {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Busca o nome de uma etiqueta pelo ID na Evolution API.
-//
-// GET {EVOLUTION_API_URL}/label/findLabels/{instanceName}
-// Header: apikey: {EVOLUTION_API_KEY}
-// Retorna array de { id: string, name: string, ... }
-//
-// Retorna o name da etiqueta com o id correspondente, ou null se não encontrar.
-// ─────────────────────────────────────────────────────────────────────────────
-async function buscarNomeEtiqueta(
-  instanceName: string,
-  labelId: string
-): Promise<string | null> {
-  const baseUrl = process.env.EVOLUTION_API_URL
-  const apiKey  = process.env.EVOLUTION_API_KEY
-
-  if (!baseUrl || !apiKey) {
-    console.error(
-      '[webhook] ❌ Variáveis EVOLUTION_API_URL ou EVOLUTION_API_KEY não configuradas'
-    )
-    return null
-  }
-
-  const url = `${baseUrl}/label/findLabels/${instanceName}`
-  console.log(`[webhook] 🔎 Buscando etiquetas na Evolution API: GET ${url}`)
-
-  try {
-    const res = await fetch(url, {
-      method:  'GET',
-      headers: { apikey: apiKey },
-    })
-
-    if (!res.ok) {
-      console.error(
-        `[webhook] ❌ Evolution API retornou status ${res.status} ao buscar etiquetas`
-      )
-      return null
-    }
-
-    const etiquetas = (await res.json()) as Array<Record<string, unknown>>
-    console.log(
-      `[webhook] 📋 Etiquetas retornadas pela Evolution API: ${JSON.stringify(etiquetas)}`
-    )
-
-    if (!Array.isArray(etiquetas)) {
-      console.error('[webhook] ❌ Resposta da Evolution API não é um array')
-      return null
-    }
-
-    const encontrada = etiquetas.find(
-      (e) => String(e.id) === String(labelId)
-    )
-
-    if (!encontrada) {
-      console.warn(
-        `[webhook] ⚠️  Etiqueta com id="${labelId}" não encontrada na lista da Evolution API`
-      )
-      return null
-    }
-
-    const nome = String(encontrada.name ?? '')
-    console.log(`[webhook] ✅ Nome da etiqueta id="${labelId}": "${nome}"`)
-    return nome || null
-
-  } catch (err) {
-    console.error('[webhook] ❌ Erro ao chamar Evolution API para buscar etiquetas:', err)
-    return null
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Busca o cliente pelo ownerPhone (ILIKE com candidatos) + fallback por
 // whatsapp_instance. Retorna null se não encontrar.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -178,7 +108,7 @@ async function buscarCliente(
 
     const { data, error } = await supabase
       .from('clients')
-      .select('id, pixel_id, capi_token, whatsapp_number, whatsapp_instance, conversion_label')
+      .select('id, pixel_id, capi_token, whatsapp_number, whatsapp_instance, conversion_label, conversion_label_id')
       .ilike('whatsapp_number', `%${candidato}`)
       .eq('is_active', true)
       .maybeSingle()
@@ -198,7 +128,7 @@ async function buscarCliente(
 
     const { data, error } = await supabase
       .from('clients')
-      .select('id, pixel_id, capi_token, whatsapp_number, whatsapp_instance, conversion_label')
+      .select('id, pixel_id, capi_token, whatsapp_number, whatsapp_instance, conversion_label, conversion_label_id')
       .eq('whatsapp_instance', instanceId)
       .eq('is_active', true)
       .maybeSingle()
@@ -452,7 +382,7 @@ export async function POST(req: NextRequest) {
 
   // ── labels.association ────────────────────────────────────────────────────
   if (event === 'LABELS_ASSOCIATION' || event === 'labels.association') {
-    // Payload real:
+    // Payload real (Evolution API v1.8.2+):
     // {
     //   "event": "labels.association",
     //   "instance": "<instanceName>",
@@ -460,9 +390,12 @@ export async function POST(req: NextRequest) {
     //     "instance": "<uuid>",
     //     "type": "add",
     //     "chatId": "5511...@s.whatsapp.net",   ← JID do contato
-    //     "labelId": "4"                         ← ID da etiqueta (string numérica)
+    //     "labelId": "4"                         ← ID numérico da etiqueta (string)
     //   }
     // }
+    // A Evolution API v1.8.2 NÃO retorna o nome da etiqueta — apenas o ID.
+    // Por isso comparamos o labelId diretamente com o campo conversion_label_id
+    // do cliente. Se conversion_label_id não estiver preenchido, o evento é ignorado.
     const data = body?.data as Record<string, unknown> | undefined
 
     console.log('[webhook] 🏷️  labels.association — data:', JSON.stringify(data, null, 2))
@@ -472,57 +405,84 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true, ignorado: true })
     }
 
-    // ── Extrai labelId de data.labelId ────────────────────────────────────
+    // ── Extrai labelId de body.data.labelId ───────────────────────────────
     const labelId = String(data?.labelId ?? '').trim()
-    console.log(`[webhook] 🏷️  labelId extraído: "${labelId}"`)
+    console.log(`[webhook] 🏷️  labelId extraído de data.labelId: "${labelId}"`)
 
     if (!labelId) {
-      console.warn('[webhook] ⚠️  labels.association — labelId ausente no payload — ignorando')
+      console.warn('[webhook] ⚠️  labels.association — labelId ausente em data.labelId — ignorando')
       return NextResponse.json({ ok: true, ignorado: true })
     }
 
-    // ── Extrai chatId de data.chatId ──────────────────────────────────────
+    // ── Extrai chatId de body.data.chatId ─────────────────────────────────
     const contactId = String(data?.chatId ?? '').trim()
-    console.log(`[webhook] 📱 chatId extraído: "${contactId}"`)
+    console.log(`[webhook] 📱 chatId extraído de data.chatId: "${contactId}"`)
 
     if (!contactId) {
-      console.warn('[webhook] ⚠️  labels.association — chatId ausente no payload — ignorando')
+      console.warn('[webhook] ⚠️  labels.association — chatId ausente em data.chatId — ignorando')
       return NextResponse.json({ ok: true, ignorado: true })
     }
 
-    // ── Resolve o nome da etiqueta via Evolution API ───────────────────────
-    // instanceId vem de body.instance (nome da instância no topo do POST)
+    // ── Extrai sender de body.sender (número do dono da instância) ────────
+    // O sender identifica qual cliente dono da instância enviou o evento.
+    const senderRaw   = String(body?.sender ?? '')
+    const senderPhone = senderRaw.split('@')[0].replace(/\D/g, '')
     console.log(
-      `[webhook] 🔎 Resolvendo nome da etiqueta id="${labelId}" para instance="${instanceId}"`
+      `[webhook] 👤 sender extraído de body.sender: "${senderRaw}" → senderPhone="${senderPhone}"`
     )
 
-    const labelName = await buscarNomeEtiqueta(instanceId, labelId)
-
-    if (!labelName) {
-      console.warn(
-        `[webhook] ⚠️  labels.association — nome da etiqueta id="${labelId}" não resolvido — ignorando`
-      )
-      return NextResponse.json({ ok: true, ignorado: true })
-    }
-
-    console.log(`[webhook] ✅ Nome resolvido: labelId="${labelId}" → "${labelName}"`)
-
-    // ── Busca cliente pelo instanceId (fallback direto, pois não há owner no payload)
-    // Tenta primeiro por whatsapp_instance; ownerPhone fica vazio para forçar o fallback
-    const resultado = await buscarCliente('', instanceId)
+    // ── Busca cliente pelo sender ou instanceId ───────────────────────────
+    const resultado = await buscarCliente(senderPhone, instanceId)
     if (!resultado) {
       console.error(
-        `[webhook] ❌ labels.association — nenhum cliente encontrado para instance="${instanceId}"`
+        `[webhook] ❌ labels.association — nenhum cliente encontrado para senderPhone="${senderPhone}" | instance="${instanceId}"`
       )
       return NextResponse.json({ ok: true, ignorado: true })
     }
 
     const { cliente, metodo } = resultado
     console.log(
-      `[webhook] ✅ Cliente encontrado via ${metodo}: id="${cliente.id}"`
+      `[webhook] ✅ Cliente encontrado via ${metodo}: id="${cliente.id}" | conversion_label="${cliente.conversion_label}" | conversion_label_id="${cliente.conversion_label_id ?? '(vazio)'}"`
     )
 
-    await processarConversao(cliente, labelName, contactId, 'labels.association')
+    // ── Compara o labelId com o campo de conversão do cliente ─────────────
+    // Prioridade:
+    //   1. Se conversion_label_id estiver preenchido → compara com labelId (direto, sem resolver nome)
+    //   2. Se conversion_label_id estiver vazio      → evento ignorado com aviso (nome não disponível na v1.8.2)
+    const labelIdEsperado = String(cliente.conversion_label_id ?? '').trim()
+
+    if (!labelIdEsperado) {
+      console.warn(
+        `[webhook] ⚠️  labels.association — cliente id="${cliente.id}" não tem conversion_label_id configurado. ` +
+        `Preencha o campo "ID da Etiqueta" no cadastro do cliente para usar este evento. Ignorando.`
+      )
+      return NextResponse.json({ ok: true, ignorado: true })
+    }
+
+    console.log(
+      `[webhook] 🎯 Comparando: labelId recebido="${labelId}" | conversion_label_id do cliente="${labelIdEsperado}"`
+    )
+
+    if (labelId !== labelIdEsperado) {
+      console.log(
+        `[webhook] ⏭️  labelId "${labelId}" !== "${labelIdEsperado}" — não é a etiqueta de conversão — ignorando`
+      )
+      return NextResponse.json({ ok: true, ignorado: true })
+    }
+
+    console.log(
+      `[webhook] 🎉 labelId "${labelId}" BATE com conversion_label_id "${labelIdEsperado}" — processando conversão!`
+    )
+
+    // Passa o labelId como labelName para processarConversao — neste fluxo a
+    // comparação já foi feita acima; processarConversao vai comparar novamente
+    // com conversion_label, então passamos o valor esperado diretamente para garantir match.
+    await processarConversao(
+      { ...cliente, conversion_label: labelIdEsperado },
+      labelId,
+      contactId,
+      'labels.association'
+    )
 
     return NextResponse.json({ ok: true })
   }
