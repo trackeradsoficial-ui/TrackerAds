@@ -1,656 +1,131 @@
-// Força avaliação em runtime — impede que o Next.js instancie o módulo
-// durante o build, quando as variáveis de ambiente ainda não existem.
-export const dynamic = 'force-dynamic'
-
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import crypto from 'crypto'
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Cliente Supabase com service role (ignora RLS)
-// ─────────────────────────────────────────────────────────────────────────────
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 )
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Utilitários
-// ─────────────────────────────────────────────────────────────────────────────
-
-/** SHA-256 de uma string — retorna hex. */
-function sha256(value: string): string {
-  return crypto.createHash('sha256').update(value).digest('hex')
-}
-
-/** Normaliza e hasheia um telefone: remove não-dígitos, aplica SHA-256. */
-function hashPhone(phone: string): string {
-  return sha256(phone.replace(/\D/g, ''))
-}
-
-/** Normaliza e hasheia um nome para o Facebook CAPI (lowercase, sem espaços extras). */
-function hashName(name: string): string {
-  return sha256(name.trim().toLowerCase())
-}
-
-/** Extrai primeiro e último nome de um nome completo. */
-function splitName(fullName: string): { firstName?: string; lastName?: string } {
-  const parts = fullName.trim().split(/\s+/).filter(Boolean)
-  if (parts.length === 0) return {}
-  return {
-    firstName: parts[0],
-    lastName:  parts.length > 1 ? parts[parts.length - 1] : undefined,
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Resolve o número real de um contato @lid via Evolution API.
-// Retorna o número real (ex: "5511999999999") ou null se não encontrado.
-// Fallback: o caller usa o senderPhone quando retorna null.
-// ─────────────────────────────────────────────────────────────────────────────
-async function resolverTelefoneDoContato(
-  chatId:       string,
-  instanceName: string
-): Promise<string | null> {
-  // IDs @lid são internos do WhatsApp e precisam ser resolvidos
-  // IDs @s.whatsapp.net já contêm o número — extrai direto
-  if (chatId.endsWith('@s.whatsapp.net')) {
-    const numero = chatId.split('@')[0].replace(/\D/g, '')
-    console.log(`[webhook] 📱 chatId é @s.whatsapp.net — número extraído diretamente: "${numero}"`)
-    return numero || null
-  }
-
-  if (!chatId.endsWith('@lid')) {
-    console.log(`[webhook] 📱 chatId formato desconhecido: "${chatId}" — tentando extrair prefixo`)
-    const numero = chatId.split('@')[0].replace(/\D/g, '')
-    return numero || null
-  }
-
-  // É um @lid — consulta a Evolution API para obter o número real
-  const evolutionUrl = process.env.EVOLUTION_API_URL
-  const evolutionKey = process.env.EVOLUTION_API_KEY
-
-  if (!evolutionUrl || !evolutionKey) {
-    console.warn('[webhook] ⚠️  EVOLUTION_API_URL ou EVOLUTION_API_KEY não configurados — impossível resolver @lid')
-    return null
-  }
-
-  const lidId     = chatId.split('@')[0]
-  const whereJson = JSON.stringify({ id: chatId })
-  const url       = `${evolutionUrl}/chat/findContacts/${instanceName}?where=${encodeURIComponent(whereJson)}`
-
-  console.log(`[webhook] 🔍 Resolvendo @lid "${chatId}" via Evolution API: GET ${url}`)
-
-  try {
-    const res = await fetch(url, {
-      method:  'GET',
-      headers: {
-        'apikey': evolutionKey,
-      },
-    })
-
-    const json = await res.json() as unknown
-
-    console.log(`[webhook] 📋 Resposta da Evolution API para @lid "${lidId}":`, JSON.stringify(json))
-
-    // A resposta pode ser um array ou um objeto com contacts/data
-    const contacts: Record<string, unknown>[] = Array.isArray(json)
-      ? json as Record<string, unknown>[]
-      : Array.isArray((json as Record<string, unknown>)?.contacts)
-        ? (json as Record<string, unknown>).contacts as Record<string, unknown>[]
-        : Array.isArray((json as Record<string, unknown>)?.data)
-          ? (json as Record<string, unknown>).data as Record<string, unknown>[]
-          : []
-
-    if (contacts.length === 0) {
-      console.warn(`[webhook] ⚠️  Nenhum contato encontrado para @lid "${chatId}"`)
-      return null
-    }
-
-    const contato = contacts[0]
-
-    // Tenta extrair o número de vários campos possíveis
-    const numero = String(
-      contato?.remoteJid?.toString().split('@')[0] ??
-      contato?.phone ??
-      contato?.number ??
-      contato?.id?.toString().split('@')[0] ??
-      ''
-    ).replace(/\D/g, '')
-
-    if (!numero) {
-      console.warn(`[webhook] ⚠️  Contato encontrado mas sem número:`, JSON.stringify(contato))
-      return null
-    }
-
-    console.log(`[webhook] ✅ @lid "${chatId}" resolvido → número: "${numero}"`)
-    return numero
-  } catch (err) {
-    console.error(`[webhook] ❌ Erro ao consultar Evolution API para @lid "${chatId}":`, String(err))
-    return null
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Envio do evento Purchase para o Facebook CAPI
-// ─────────────────────────────────────────────────────────────────────────────
-async function sendCapiEvent(opts: {
-  pixelId:     string
-  capiToken:   string
-  phoneHashed: string
-  fnHashed?:   string
-  lnHashed?:   string
-}): Promise<{ sucesso: boolean; resposta: Record<string, unknown> }> {
-  const { pixelId, capiToken, phoneHashed, fnHashed, lnHashed } = opts
-
-  const evento = {
-    event_name:    'Purchase',
-    event_time:    Math.floor(Date.now() / 1000),
-    action_source: 'other',
-    user_data: {
-      ph: [phoneHashed],
-      ...(fnHashed ? { fn: [fnHashed] } : {}),
-      ...(lnHashed ? { ln: [lnHashed] } : {}),
-    },
-    custom_data: { currency: 'BRL', value: 1 },
-  }
-
-  const url =
-    `https://graph.facebook.com/v19.0/${pixelId}/events?access_token=${capiToken}`
-
-  try {
-    const res  = await fetch(url, {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ data: [evento] }),
-    })
-    const json = (await res.json()) as Record<string, unknown>
-    return { sucesso: res.ok, resposta: json }
-  } catch (err) {
-    return { sucesso: false, resposta: { erro: String(err) } }
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Busca o cliente pelo ownerPhone (ILIKE com candidatos) + fallback por
-// whatsapp_instance. Retorna null se não encontrar.
-// ─────────────────────────────────────────────────────────────────────────────
-async function buscarCliente(
-  ownerPhone: string,
-  instanceId: string
-): Promise<{ cliente: Record<string, unknown>; metodo: string } | null> {
-  // Candidatos em ordem: com DDI, sem DDI, sem DDI e sem nono dígito
-  // Só tenta a busca por número se ownerPhone tiver pelo menos 8 dígitos —
-  // evita ILIKE '%' que retornaria qualquer cliente ativo
-  const candidatos: string[] = ownerPhone.length >= 8 ? [ownerPhone] : []
-  if (ownerPhone.startsWith('55') && ownerPhone.length === 13) {
-    const semDDI = ownerPhone.slice(2)                            // "19982250102"
-    candidatos.push(semDDI)
-    if (semDDI.length === 11) {
-      candidatos.push(semDDI.slice(0, 2) + semDDI.slice(3))      // "1982250102"
-    }
-  }
-
-  for (const candidato of candidatos) {
-    console.log(`[webhook] 🔎 Buscando cliente com whatsapp_number ILIKE "%${candidato}"`)
-
-    const { data, error } = await supabase
-      .from('clients')
-      .select('id, pixel_id, capi_token, whatsapp_number, whatsapp_instance, conversion_label, conversion_label_id')
-      .ilike('whatsapp_number', `%${candidato}`)
-      .eq('is_active', true)
-      .maybeSingle()
-
-    if (error) {
-      console.error(`[webhook] ⚠️  Erro na busca por "%${candidato}":`, error.message)
-      continue
-    }
-    if (data) {
-      return { cliente: data as Record<string, unknown>, metodo: `whatsapp_number ILIKE "%${candidato}"` }
-    }
-  }
-
-  // Fallback: por whatsapp_instance
-  if (instanceId) {
-    console.log(`[webhook] 🔎 Fallback: buscando cliente com whatsapp_instance="${instanceId}"`)
-
-    const { data, error } = await supabase
-      .from('clients')
-      .select('id, pixel_id, capi_token, whatsapp_number, whatsapp_instance, conversion_label, conversion_label_id')
-      .eq('whatsapp_instance', instanceId)
-      .eq('is_active', true)
-      .maybeSingle()
-
-    if (!error && data) {
-      return { cliente: data as Record<string, unknown>, metodo: `whatsapp_instance="${instanceId}"` }
-    }
-  }
-
-  return null
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Verifica se já existe uma conversão para o mesmo cliente + telefone
-// nas últimas 24 horas (evita duplicatas).
-// ─────────────────────────────────────────────────────────────────────────────
-async function jaConvertiuRecentemente(
-  clientId: unknown,
-  phoneRaw: string
-): Promise<boolean> {
-  const limite24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
-
-  const { data, error } = await supabase
-    .from('leads')
-    .select('id')
-    .eq('client_id', clientId)
-    .eq('phone_raw', phoneRaw)
-    .eq('status', 'converted')
-    .gte('created_at', limite24h)
-    .limit(1)
-    .maybeSingle()
-
-  if (error) {
-    console.error('[webhook] ⚠️  Erro ao verificar duplicata:', error.message)
-    return false // em caso de erro, prossegue (não bloqueia)
-  }
-
-  return data !== null
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Núcleo de conversão — compartilhado por chats.update e labels.association.
-//
-// Recebe:
-//   cliente   — linha da tabela clients
-//   labelName — nome da etiqueta que chegou no payload (já como string)
-//   phoneRaw  — número real do contato (já resolvido — sem @)
-//   origem    — string de log para identificar de qual evento veio
-// ─────────────────────────────────────────────────────────────────────────────
-async function processarConversao(
-  cliente:   Record<string, unknown>,
-  labelName: string,
-  phoneRaw:  string,
-  origem:    string
-): Promise<void> {
-  const labelEsperada = String(cliente.conversion_label ?? 'Comprou').toLowerCase().trim()
-  const labelRecebida = labelName.toLowerCase().trim()
-
-  console.log(
-    `[webhook/${origem}] 🎯 Etiqueta esperada: "${labelEsperada}" | recebida: "${labelRecebida}"`
-  )
-
-  if (labelRecebida !== labelEsperada) {
-    console.log(
-      `[webhook/${origem}] ⏭️  Etiqueta "${labelRecebida}" não é a de conversão — ignorando`
-    )
-    return
-  }
-
-  console.log(`[webhook/${origem}] 🎉 Etiqueta "${labelEsperada}" DETECTADA!`)
-
-  // ── Valida o telefone ─────────────────────────────────────────────────────
-  const phoneNormalizado = phoneRaw.replace(/\D/g, '')
-
-  console.log(`[webhook/${origem}] 📱 phoneRaw="${phoneRaw}" → normalizado="${phoneNormalizado}"`)
-
-  if (!phoneNormalizado || phoneNormalizado.length < 5) {
-    console.warn(`[webhook/${origem}] ⚠️  Telefone inválido ("${phoneRaw}") — ignorando`)
-    return
-  }
-
-  // ── Verifica duplicata nas últimas 24 horas ───────────────────────────────
-  const duplicado = await jaConvertiuRecentemente(cliente.id, phoneNormalizado)
-  if (duplicado) {
-    console.log(
-      `[webhook/${origem}] ♻️  Lead para "${phoneNormalizado}" já existe nas últimas 24h — ignorando duplicata`
-    )
-    return
-  }
-
-  // ── Hasheia o telefone ────────────────────────────────────────────────────
-  const phoneHashed = hashPhone(phoneNormalizado)
-  console.log(
-    `[webhook/${origem}] 🔐 phoneNormalizado="${phoneNormalizado}" → phoneHashed="${phoneHashed.slice(0, 16)}..."`
-  )
-
-  // ── Busca nome do contato para enriquecer o CAPI ──────────────────────────
-  const { data: contatoRow } = await supabase
-    .from('contacts')
-    .select('name')
-    .eq('client_id', cliente.id)
-    .eq('phone', phoneNormalizado)
-    .maybeSingle()
-
-  const nomeCompleto = String((contatoRow as Record<string, unknown> | null)?.name ?? '')
-  console.log(
-    `[webhook/${origem}] 👤 Nome do contato: "${nomeCompleto || '(não encontrado)'}"`
-  )
-
-  let fnHashed: string | undefined
-  let lnHashed: string | undefined
-
-  if (nomeCompleto) {
-    const { firstName, lastName } = splitName(nomeCompleto)
-    if (firstName) {
-      fnHashed = hashName(firstName)
-      console.log(`[webhook/${origem}] 🔐 fn="${firstName}" → ${fnHashed.slice(0, 16)}...`)
-    }
-    if (lastName) {
-      lnHashed = hashName(lastName)
-      console.log(`[webhook/${origem}] 🔐 ln="${lastName}" → ${lnHashed.slice(0, 16)}...`)
-    }
-  }
-
-  // ── Insere lead (phone_raw = número real; label = nome da etiqueta) ────────
-  const nomeEtiqueta = String(cliente.conversion_label ?? 'Comprou')
-
-  const { data: leadInserido, error: erroLead } = await supabase
-    .from('leads')
-    .insert({
-      client_id:           cliente.id,
-      phone_raw:           phoneNormalizado,
-      phone_hashed:        phoneHashed,
-      label:               nomeEtiqueta,
-      status:              'converted',
-      facebook_event_sent: false,
-    })
-    .select('id')
-    .single()
-
-  if (erroLead || !leadInserido) {
-    console.error(
-      `[webhook/${origem}] ❌ Erro ao inserir lead:`,
-      erroLead?.message ?? 'retorno nulo'
-    )
-    return
-  }
-
-  const leadId = String((leadInserido as Record<string, unknown>).id)
-  console.log(`[webhook/${origem}] ✅ Lead inserido: id="${leadId}" label="${nomeEtiqueta}"`)
-
-  // ── Dispara evento Purchase no Facebook CAPI ──────────────────────────────
-  console.log(
-    `[webhook/${origem}] 📡 Disparando CAPI — pixel="${cliente.pixel_id}"` +
-    (fnHashed ? ' +fn' : '') +
-    (lnHashed ? ' +ln' : '')
-  )
-
-  const { sucesso, resposta } = await sendCapiEvent({
-    pixelId:   String(cliente.pixel_id),
-    capiToken: String(cliente.capi_token),
-    phoneHashed,
-    fnHashed,
-    lnHashed,
-  })
-
-  console.log(
-    `[webhook/${origem}] ${sucesso ? '✅' : '❌'} CAPI: sucesso=${sucesso} | ${JSON.stringify(resposta)}`
-  )
-
-  // ── Atualiza lead com resultado do CAPI ───────────────────────────────────
-  const { error: erroUpdate } = await supabase
-    .from('leads')
-    .update({
-      facebook_event_sent:     sucesso,
-      facebook_event_response: resposta,
-    })
-    .eq('id', leadId)
-
-  if (erroUpdate) {
-    console.error(
-      `[webhook/${origem}] ⚠️  Falha ao atualizar lead "${leadId}":`, erroUpdate.message
-    )
-  } else {
-    console.log(`[webhook/${origem}] 🏁 Lead "${leadId}" finalizado`)
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// GET — responde ao challenge de verificação da Evolution API
-// ─────────────────────────────────────────────────────────────────────────────
-export async function GET(req: NextRequest) {
-  const challenge = req.nextUrl.searchParams.get('hub.challenge')
-  if (challenge) return new NextResponse(challenge, { status: 200 })
-  return NextResponse.json({ ok: true })
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// POST — processa eventos da Evolution API
-// ─────────────────────────────────────────────────────────────────────────────
 export async function POST(req: NextRequest) {
-  // ── 1. Leitura e log do payload ───────────────────────────────────────────
-  let body: Record<string, unknown>
   try {
-    const texto = await req.text()
-    console.log('[webhook] ✉️  Payload recebido:\n' + texto)
-    body = JSON.parse(texto) as Record<string, unknown>
-  } catch (err) {
-    console.error('[webhook] ❌ Falha ao parsear o payload:', err)
-    return NextResponse.json(
-      { erro: 'Payload inválido — esperado JSON', detalhe: String(err) },
-      { status: 400 }
-    )
-  }
+    const body = await req.json()
+    const event = body.event
 
-  console.log('[webhook] 📦 Body completo:', JSON.stringify(body, null, 2))
-
-  const event      = String(body?.event ?? body?.type ?? '')
-  const instanceId = String(body?.instance ?? body?.instanceName ?? '')
-  console.log(`[webhook] 📌 Evento: "${event}" | instance: "${instanceId}"`)
-
-  // ── 2. Roteamento por tipo de evento ──────────────────────────────────────
-
-  // ── chats.update ─────────────────────────────────────────────────────────
-  if (event === 'CHATS_UPDATE' || event === 'chats.update') {
-    const rawData = body?.data
-    const chats: Record<string, unknown>[] = Array.isArray(rawData)
-      ? rawData as Record<string, unknown>[]
-      : rawData != null
-        ? [rawData as Record<string, unknown>]
-        : []
-
-    console.log(`[webhook] 🔄 chats.update — ${chats.length} chat(s)`)
-
-    for (const [idx, chat] of chats.entries()) {
-      console.log(
-        `[webhook] 📋 Chat [${idx + 1}/${chats.length}]:`,
-        JSON.stringify(chat, null, 2)
-      )
-
-      // Extrai ownerPhone
-      const ownerRaw   = String(chat?.owner ?? body?.sender ?? '')
-      const ownerPhone = ownerRaw.split('@')[0].replace(/\D/g, '')
-      console.log(`[webhook] 👤 ownerRaw="${ownerRaw}" → ownerPhone="${ownerPhone}"`)
-
-      if (!ownerPhone || ownerPhone.length < 8) {
-        console.warn(`[webhook] ⚠️  Chat [${idx + 1}] — ownerPhone inválido — ignorando`)
-        continue
-      }
-
-      // Extrai labels (array de strings ou objetos { name })
-      const labelsRaw: unknown[] = Array.isArray(chat?.labels)
-        ? chat.labels as unknown[]
-        : []
-
-      const labels: string[] = labelsRaw.map((l) => {
-        if (typeof l === 'string') return l
-        if (l !== null && typeof l === 'object') {
-          const obj = l as Record<string, unknown>
-          if (typeof obj.name === 'string') return obj.name
-        }
-        return ''
-      }).filter(Boolean)
-
-      console.log(`[webhook] 🏷️  Etiquetas: ${JSON.stringify(labels)}`)
-
-      // Busca cliente
-      const resultado = await buscarCliente(ownerPhone, instanceId)
-      if (!resultado) {
-        console.error(
-          `[webhook] ❌ Chat [${idx + 1}] — nenhum cliente encontrado para ownerPhone="${ownerPhone}"`
-        )
-        continue
-      }
-
-      const { cliente, metodo } = resultado
-      console.log(
-        `[webhook] ✅ Cliente encontrado via ${metodo}: id="${cliente.id}"`
-      )
-
-      // Processa cada etiqueta presente no chat
-      // O contactId neste evento já é um JID normal (ex: @s.whatsapp.net)
-      const contactJid = String(chat?.id ?? chat?.remoteJid ?? '')
-      const phoneRaw   = contactJid.split('@')[0].replace(/\D/g, '')
-
-      for (const labelName of labels) {
-        await processarConversao(cliente, labelName, phoneRaw, 'chats.update')
-      }
+    if (event !== 'labels.association') {
+      return NextResponse.json({ ok: true, ignorado: true, event })
     }
 
-    return NextResponse.json({ ok: true })
-  }
+    const type = body.data?.type
+    const labelId = body.data?.labelId
+    const chatId = body.data?.chatId || ''
+    const senderRaw = body.sender || ''
+    const instanceName = body.instance || ''
+    const senderPhone = senderRaw.replace('@s.whatsapp.net', '')
+    const contactPhone = chatId.replace('@s.whatsapp.net', '').replace('@lid', '')
 
-  // ── labels.association ────────────────────────────────────────────────────
-  if (event === 'LABELS_ASSOCIATION' || event === 'labels.association') {
-    // Payload real (Evolution API v1.8.2+):
-    // {
-    //   "event": "labels.association",
-    //   "instance": "<instanceName>",
-    //   "sender": "5519...@s.whatsapp.net",
-    //   "data": {
-    //     "instance": "<uuid>",
-    //     "type": "add" | "remove",
-    //     "chatId": "243550449086609@lid",   ← JID do contato (pode ser @lid)
-    //     "labelId": "4"                     ← ID numérico da etiqueta (string)
-    //   }
-    // }
-    const data = body?.data as Record<string, unknown> | undefined
+    console.log(`[webhook] type=${type} labelId=${labelId} chatId=${chatId} sender=${senderPhone}`)
 
-    console.log('[webhook] 🏷️  labels.association — data:', JSON.stringify(data, null, 2))
+    // Busca cliente pelo número do sender
+    const { data: clients } = await supabase
+      .from('clients')
+      .select('*')
+      .or(`whatsapp_number.ilike.%${senderPhone.slice(-9)},whatsapp_instance.eq.${instanceName}`)
+      .limit(1)
 
-    if (!data) {
-      console.warn('[webhook] ⚠️  labels.association — campo data ausente — ignorando')
-      return NextResponse.json({ ok: true, ignorado: true })
+    if (!clients || clients.length === 0) {
+      console.log(`[webhook] cliente não encontrado para ${senderPhone}`)
+      return NextResponse.json({ ok: true, resultado: 'cliente não encontrado' })
     }
 
-    // ── 1. PRIMEIRO: extrai tipo — se for "remove", trata imediatamente ───
-    // Garantia: o fluxo de inserção de novo lead NUNCA executa quando type=remove
-    const tipo = String(data?.type ?? 'add').toLowerCase()
-    console.log(`[webhook] 🔖 Tipo da operação: "${tipo}"`)
+    const client = clients[0]
+    const conversionLabelId = client.conversion_label_id || ''
 
-    // ── 2. Extrai labelId ─────────────────────────────────────────────────
-    const labelId = String(data?.labelId ?? '').trim()
-    console.log(`[webhook] 🏷️  labelId extraído de data.labelId: "${labelId}"`)
-
-    if (!labelId) {
-      console.warn('[webhook] ⚠️  labels.association — labelId ausente em data.labelId — ignorando')
-      return NextResponse.json({ ok: true, ignorado: true })
+    if (labelId !== conversionLabelId) {
+      console.log(`[webhook] labelId=${labelId} não é o de conversão (${conversionLabelId})`)
+      return NextResponse.json({ ok: true, resultado: 'etiqueta não é de conversão' })
     }
 
-    // ── 3. Extrai chatId ──────────────────────────────────────────────────
-    const chatId = String(data?.chatId ?? '').trim()
-    console.log(`[webhook] 📱 chatId extraído de data.chatId: "${chatId}"`)
-
-    if (!chatId) {
-      console.warn('[webhook] ⚠️  labels.association — chatId ausente em data.chatId — ignorando')
-      return NextResponse.json({ ok: true, ignorado: true })
-    }
-
-    // ── 4. Extrai senderPhone ─────────────────────────────────────────────
-    const senderRaw   = String(body?.sender ?? '')
-    const senderPhone = senderRaw.split('@')[0].replace(/\D/g, '')
-    console.log(`[webhook] 👤 sender: "${senderRaw}" → senderPhone="${senderPhone}"`)
-
-    // ── 5. Busca cliente ──────────────────────────────────────────────────
-    const resultado = await buscarCliente(senderPhone, instanceId)
-    if (!resultado) {
-      console.error(
-        `[webhook] ❌ labels.association — nenhum cliente encontrado para senderPhone="${senderPhone}" | instance="${instanceId}"`
-      )
-      return NextResponse.json({ ok: true, ignorado: true })
-    }
-
-    const { cliente, metodo } = resultado
-    console.log(
-      `[webhook] ✅ Cliente encontrado via ${metodo}: id="${cliente.id}" | conversion_label="${cliente.conversion_label}" | conversion_label_id="${cliente.conversion_label_id ?? '(vazio)'}"`
-    )
-
-    // ── 6. Verifica se o labelId é o de conversão ─────────────────────────
-    const labelIdEsperado = String(cliente.conversion_label_id ?? '').trim()
-
-    if (!labelIdEsperado) {
-      console.warn(
-        `[webhook] ⚠️  labels.association — cliente id="${cliente.id}" não tem conversion_label_id configurado. ` +
-        `Preencha o campo "ID da Etiqueta" no cadastro do cliente. Ignorando.`
-      )
-      return NextResponse.json({ ok: true, ignorado: true })
-    }
-
-    console.log(
-      `[webhook] 🎯 Comparando: labelId recebido="${labelId}" | conversion_label_id do cliente="${labelIdEsperado}"`
-    )
-
-    if (labelId !== labelIdEsperado) {
-      console.log(
-        `[webhook] ⏭️  labelId "${labelId}" !== "${labelIdEsperado}" — não é a etiqueta de conversão — ignorando`
-      )
-      return NextResponse.json({ ok: true, ignorado: true })
-    }
-
-    // ── 7. type === "remove" → cancela lead existente e RETORNA ──────────
-    // Este bloco vem ANTES de qualquer resolução de @lid ou inserção de lead.
-    if (tipo === 'remove') {
-      console.log(
-        `[webhook] 🗑️  Tipo "remove" — cancelando conversão para cliente "${cliente.id}" | chatId="${chatId}"`
-      )
-
-      // Tenta resolver o telefone para cancelar com precisão; se falhar usa chatId prefixo
-      const phoneResolvido = await resolverTelefoneDoContato(chatId, instanceId)
-      const phoneParaCancelar = phoneResolvido ?? chatId.split('@')[0].replace(/\D/g, '')
-
-      console.log(`[webhook] 📱 Telefone para cancelar: "${phoneParaCancelar}"`)
-
-      const { error: erroCancelamento } = await supabase
+    if (type === 'remove') {
+      // Cancela a conversão
+      const { data: lead } = await supabase
         .from('leads')
-        .update({ status: 'cancelled' })
-        .eq('client_id', cliente.id)
-        .eq('phone_raw', phoneParaCancelar)
+        .select('id')
+        .eq('client_id', client.id)
+        .eq('phone_raw', contactPhone)
         .eq('status', 'converted')
+        .single()
 
-      if (erroCancelamento) {
-        console.error('[webhook] ❌ Erro ao cancelar lead:', erroCancelamento.message)
-      } else {
-        console.log(`[webhook] ✅ Lead(s) de "${phoneParaCancelar}" marcado(s) como "cancelled"`)
+      if (lead) {
+        await supabase.from('leads').update({ status: 'cancelled' }).eq('id', lead.id)
+        console.log(`[webhook] conversão cancelada: ${contactPhone}`)
       }
 
       return NextResponse.json({ ok: true, acao: 'cancelado' })
     }
 
-    // ── 8. type === "add" → resolve telefone e processa conversão ─────────
-    console.log(
-      `[webhook] 🎉 labelId "${labelId}" BATE com conversion_label_id "${labelIdEsperado}" — processando conversão!`
-    )
+    if (type === 'add') {
+      // Verifica duplicata nas últimas 24h
+      const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
+      const { data: existing } = await supabase
+        .from('leads')
+        .select('id')
+        .eq('client_id', client.id)
+        .eq('phone_raw', contactPhone)
+        .eq('status', 'converted')
+        .gte('created_at', since)
+        .single()
 
-    const phoneResolvido = await resolverTelefoneDoContato(chatId, instanceId)
-    const phoneRaw = phoneResolvido ?? senderPhone
+      if (existing) {
+        console.log(`[webhook] duplicata ignorada: ${contactPhone}`)
+        return NextResponse.json({ ok: true, resultado: 'duplicata ignorada' })
+      }
 
-    console.log(
-      `[webhook] 📱 chatId="${chatId}" → phoneRaw="${phoneRaw}"` +
-      (phoneResolvido ? ' (resolvido via Evolution API)' : ' (fallback: senderPhone)')
-    )
+      const phoneHashed = crypto.createHash('sha256').update(contactPhone).digest('hex')
+      const labelName = client.conversion_label || 'Comprou'
 
-    // Passa o nome da etiqueta configurada (conversion_label) para ser salvo no lead
-    await processarConversao(
-      cliente,
-      String(cliente.conversion_label ?? labelId),
-      phoneRaw,
-      'labels.association'
-    )
+      const { data: lead } = await supabase.from('leads').insert({
+        client_id: client.id,
+        phone_raw: contactPhone,
+        phone_hashed: phoneHashed,
+        label: labelName,
+        status: 'converted',
+        facebook_event_sent: false
+      }).select().single()
 
-    return NextResponse.json({ ok: true })
+      console.log(`[webhook] lead salvo: ${lead?.id}`)
+
+      const capiRes = await fetch(
+        `https://graph.facebook.com/v19.0/${client.pixel_id}/events`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            data: [{
+              event_name: 'Purchase',
+              event_time: Math.floor(Date.now() / 1000),
+              user_data: { ph: [phoneHashed] },
+              custom_data: { currency: 'BRL', value: 0 }
+            }],
+            access_token: client.capi_token
+          })
+        }
+      )
+
+      const capiData = await capiRes.json()
+      await supabase.from('leads').update({
+        facebook_event_sent: true,
+        facebook_event_response: capiData
+      }).eq('id', lead?.id)
+
+      console.log(`[webhook] CAPI enviado: ${JSON.stringify(capiData)}`)
+      return NextResponse.json({ ok: true, resultado: 'conversão registrada' })
+    }
+
+    return NextResponse.json({ ok: true, resultado: 'tipo desconhecido' })
+
+  } catch (e: any) {
+    console.error('[webhook] erro:', e.message)
+    return NextResponse.json({ error: e.message }, { status: 500 })
   }
-
-  // ── Evento não tratado ────────────────────────────────────────────────────
-  console.log(`[webhook] ⏭️  Evento ignorado: "${event}"`)
-  return NextResponse.json({ ok: true, ignorado: true })
 }
