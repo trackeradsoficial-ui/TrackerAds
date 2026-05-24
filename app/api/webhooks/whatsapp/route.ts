@@ -162,7 +162,9 @@ async function buscarCliente(
   instanceId: string
 ): Promise<{ cliente: Record<string, unknown>; metodo: string } | null> {
   // Candidatos em ordem: com DDI, sem DDI, sem DDI e sem nono dígito
-  const candidatos: string[] = [ownerPhone]
+  // Só tenta a busca por número se ownerPhone tiver pelo menos 8 dígitos —
+  // evita ILIKE '%' que retornaria qualquer cliente ativo
+  const candidatos: string[] = ownerPhone.length >= 8 ? [ownerPhone] : []
   if (ownerPhone.startsWith('55') && ownerPhone.length === 13) {
     const semDDI = ownerPhone.slice(2)                            // "19982250102"
     candidatos.push(semDDI)
@@ -450,66 +452,67 @@ export async function POST(req: NextRequest) {
 
   // ── labels.association ────────────────────────────────────────────────────
   if (event === 'LABELS_ASSOCIATION' || event === 'labels.association') {
-    // Payload: { event, instance, data: { id, owner, label: { id, name } } }
+    // Payload real:
+    // {
+    //   "event": "labels.association",
+    //   "instance": "<instanceName>",
+    //   "data": {
+    //     "instance": "<uuid>",
+    //     "type": "add",
+    //     "chatId": "5511...@s.whatsapp.net",   ← JID do contato
+    //     "labelId": "4"                         ← ID da etiqueta (string numérica)
+    //   }
+    // }
     const data = body?.data as Record<string, unknown> | undefined
 
     console.log('[webhook] 🏷️  labels.association — data:', JSON.stringify(data, null, 2))
 
     if (!data) {
-      console.warn('[webhook] ⚠️  labels.association sem campo data — ignorando')
+      console.warn('[webhook] ⚠️  labels.association — campo data ausente — ignorando')
       return NextResponse.json({ ok: true, ignorado: true })
     }
 
-    // Extrai ownerPhone
-    const ownerRaw   = String(data?.owner ?? body?.sender ?? '')
-    const ownerPhone = ownerRaw.split('@')[0].replace(/\D/g, '')
-    console.log(`[webhook] 👤 ownerRaw="${ownerRaw}" → ownerPhone="${ownerPhone}"`)
-
-    if (!ownerPhone || ownerPhone.length < 8) {
-      console.warn(`[webhook] ⚠️  labels.association — ownerPhone inválido ("${ownerPhone}") — ignorando`)
-      return NextResponse.json({ ok: true, ignorado: true })
-    }
-
-    // Extrai o ID da etiqueta do payload
-    // O payload traz apenas o id — o name precisa ser buscado na Evolution API
-    const labelObj = data?.label
-    const labelId  = typeof labelObj === 'object' && labelObj !== null
-      ? String((labelObj as Record<string, unknown>).id ?? '')
-      : String(labelObj ?? '')
-
-    console.log(`[webhook] 🏷️  ID da etiqueta recebida: "${labelId}"`)
+    // ── Extrai labelId de data.labelId ────────────────────────────────────
+    const labelId = String(data?.labelId ?? '').trim()
+    console.log(`[webhook] 🏷️  labelId extraído: "${labelId}"`)
 
     if (!labelId) {
-      console.warn('[webhook] ⚠️  labels.association — sem id de etiqueta — ignorando')
+      console.warn('[webhook] ⚠️  labels.association — labelId ausente no payload — ignorando')
       return NextResponse.json({ ok: true, ignorado: true })
     }
 
-    // Busca o nome da etiqueta na Evolution API pelo ID
+    // ── Extrai chatId de data.chatId ──────────────────────────────────────
+    const contactId = String(data?.chatId ?? '').trim()
+    console.log(`[webhook] 📱 chatId extraído: "${contactId}"`)
+
+    if (!contactId) {
+      console.warn('[webhook] ⚠️  labels.association — chatId ausente no payload — ignorando')
+      return NextResponse.json({ ok: true, ignorado: true })
+    }
+
+    // ── Resolve o nome da etiqueta via Evolution API ───────────────────────
+    // instanceId vem de body.instance (nome da instância no topo do POST)
+    console.log(
+      `[webhook] 🔎 Resolvendo nome da etiqueta id="${labelId}" para instance="${instanceId}"`
+    )
+
     const labelName = await buscarNomeEtiqueta(instanceId, labelId)
 
     if (!labelName) {
       console.warn(
-        `[webhook] ⚠️  labels.association — não foi possível resolver o nome da etiqueta id="${labelId}" — ignorando`
+        `[webhook] ⚠️  labels.association — nome da etiqueta id="${labelId}" não resolvido — ignorando`
       )
       return NextResponse.json({ ok: true, ignorado: true })
     }
 
-    console.log(`[webhook] 🏷️  Nome resolvido da etiqueta: "${labelName}"`)
+    console.log(`[webhook] ✅ Nome resolvido: labelId="${labelId}" → "${labelName}"`)
 
-    // JID do contato que recebeu a etiqueta
-    const contactId = String(data?.id ?? '')
-    console.log(`[webhook] 📱 contactId="${contactId}"`)
-
-    if (!contactId) {
-      console.warn('[webhook] ⚠️  labels.association — sem id do contato — ignorando')
-      return NextResponse.json({ ok: true, ignorado: true })
-    }
-
-    // Busca cliente
-    const resultado = await buscarCliente(ownerPhone, instanceId)
+    // ── Busca cliente pelo instanceId (fallback direto, pois não há owner no payload)
+    // Tenta primeiro por whatsapp_instance; ownerPhone fica vazio para forçar o fallback
+    const resultado = await buscarCliente('', instanceId)
     if (!resultado) {
       console.error(
-        `[webhook] ❌ labels.association — nenhum cliente encontrado para ownerPhone="${ownerPhone}"`
+        `[webhook] ❌ labels.association — nenhum cliente encontrado para instance="${instanceId}"`
       )
       return NextResponse.json({ ok: true, ignorado: true })
     }
