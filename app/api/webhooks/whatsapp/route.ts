@@ -75,19 +75,18 @@ async function resolverTelefoneDoContato(
     return null
   }
 
-  const lidId = chatId.split('@')[0]
-  const url   = `${evolutionUrl}/chat/findContacts/${instanceName}`
+  const lidId     = chatId.split('@')[0]
+  const whereJson = JSON.stringify({ id: chatId })
+  const url       = `${evolutionUrl}/chat/findContacts/${instanceName}?where=${encodeURIComponent(whereJson)}`
 
-  console.log(`[webhook] 🔍 Resolvendo @lid "${chatId}" via Evolution API: GET ${url}?where={"id":"${chatId}"}`)
+  console.log(`[webhook] 🔍 Resolvendo @lid "${chatId}" via Evolution API: GET ${url}`)
 
   try {
     const res = await fetch(url, {
-      method:  'POST',
+      method:  'GET',
       headers: {
-        'Content-Type': 'application/json',
-        'apikey':        evolutionKey,
+        'apikey': evolutionKey,
       },
-      body: JSON.stringify({ where: { id: chatId } }),
     })
 
     const json = await res.json() as unknown
@@ -534,11 +533,12 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true, ignorado: true })
     }
 
-    // ── Extrai tipo da operação (add / remove) ────────────────────────────
+    // ── 1. PRIMEIRO: extrai tipo — se for "remove", trata imediatamente ───
+    // Garantia: o fluxo de inserção de novo lead NUNCA executa quando type=remove
     const tipo = String(data?.type ?? 'add').toLowerCase()
     console.log(`[webhook] 🔖 Tipo da operação: "${tipo}"`)
 
-    // ── Extrai labelId de body.data.labelId ───────────────────────────────
+    // ── 2. Extrai labelId ─────────────────────────────────────────────────
     const labelId = String(data?.labelId ?? '').trim()
     console.log(`[webhook] 🏷️  labelId extraído de data.labelId: "${labelId}"`)
 
@@ -547,7 +547,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true, ignorado: true })
     }
 
-    // ── Extrai chatId de body.data.chatId ─────────────────────────────────
+    // ── 3. Extrai chatId ──────────────────────────────────────────────────
     const chatId = String(data?.chatId ?? '').trim()
     console.log(`[webhook] 📱 chatId extraído de data.chatId: "${chatId}"`)
 
@@ -556,14 +556,12 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true, ignorado: true })
     }
 
-    // ── Extrai sender de body.sender (número do dono da instância) ────────
+    // ── 4. Extrai senderPhone ─────────────────────────────────────────────
     const senderRaw   = String(body?.sender ?? '')
     const senderPhone = senderRaw.split('@')[0].replace(/\D/g, '')
-    console.log(
-      `[webhook] 👤 sender: "${senderRaw}" → senderPhone="${senderPhone}"`
-    )
+    console.log(`[webhook] 👤 sender: "${senderRaw}" → senderPhone="${senderPhone}"`)
 
-    // ── Busca cliente pelo sender ou instanceId ───────────────────────────
+    // ── 5. Busca cliente ──────────────────────────────────────────────────
     const resultado = await buscarCliente(senderPhone, instanceId)
     if (!resultado) {
       console.error(
@@ -577,22 +575,13 @@ export async function POST(req: NextRequest) {
       `[webhook] ✅ Cliente encontrado via ${metodo}: id="${cliente.id}" | conversion_label="${cliente.conversion_label}" | conversion_label_id="${cliente.conversion_label_id ?? '(vazio)'}"`
     )
 
-    // ── Resolve o número real do contato (resolve @lid se necessário) ─────
-    const phoneResolvido = await resolverTelefoneDoContato(chatId, instanceId)
-    const phoneRaw = phoneResolvido ?? senderPhone // fallback: usa o número do dono
-
-    console.log(
-      `[webhook] 📱 chatId="${chatId}" → phoneRaw="${phoneRaw}"` +
-      (phoneResolvido ? ' (resolvido via Evolution API)' : ' (fallback: senderPhone)')
-    )
-
-    // ── Verifica se é o labelId de conversão ──────────────────────────────
+    // ── 6. Verifica se o labelId é o de conversão ─────────────────────────
     const labelIdEsperado = String(cliente.conversion_label_id ?? '').trim()
 
     if (!labelIdEsperado) {
       console.warn(
         `[webhook] ⚠️  labels.association — cliente id="${cliente.id}" não tem conversion_label_id configurado. ` +
-        `Preencha o campo "ID da Etiqueta" no cadastro do cliente para usar este evento. Ignorando.`
+        `Preencha o campo "ID da Etiqueta" no cadastro do cliente. Ignorando.`
       )
       return NextResponse.json({ ok: true, ignorado: true })
     }
@@ -608,31 +597,46 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true, ignorado: true })
     }
 
-    // ── Tratamento do tipo "remove" — cancela conversão existente ─────────
+    // ── 7. type === "remove" → cancela lead existente e RETORNA ──────────
+    // Este bloco vem ANTES de qualquer resolução de @lid ou inserção de lead.
     if (tipo === 'remove') {
       console.log(
-        `[webhook] 🗑️  Tipo "remove" detectado — cancelando conversão de "${phoneRaw}" para cliente "${cliente.id}"`
+        `[webhook] 🗑️  Tipo "remove" — cancelando conversão para cliente "${cliente.id}" | chatId="${chatId}"`
       )
+
+      // Tenta resolver o telefone para cancelar com precisão; se falhar usa chatId prefixo
+      const phoneResolvido = await resolverTelefoneDoContato(chatId, instanceId)
+      const phoneParaCancelar = phoneResolvido ?? chatId.split('@')[0].replace(/\D/g, '')
+
+      console.log(`[webhook] 📱 Telefone para cancelar: "${phoneParaCancelar}"`)
 
       const { error: erroCancelamento } = await supabase
         .from('leads')
         .update({ status: 'cancelled' })
         .eq('client_id', cliente.id)
-        .eq('phone_raw', phoneRaw)
+        .eq('phone_raw', phoneParaCancelar)
         .eq('status', 'converted')
 
       if (erroCancelamento) {
         console.error('[webhook] ❌ Erro ao cancelar lead:', erroCancelamento.message)
       } else {
-        console.log(`[webhook] ✅ Lead(s) de "${phoneRaw}" marcado(s) como "cancelled"`)
+        console.log(`[webhook] ✅ Lead(s) de "${phoneParaCancelar}" marcado(s) como "cancelled"`)
       }
 
-      return NextResponse.json({ ok: true, cancelado: true })
+      return NextResponse.json({ ok: true, acao: 'cancelado' })
     }
 
-    // ── Tipo "add" — processa conversão ───────────────────────────────────
+    // ── 8. type === "add" → resolve telefone e processa conversão ─────────
     console.log(
       `[webhook] 🎉 labelId "${labelId}" BATE com conversion_label_id "${labelIdEsperado}" — processando conversão!`
+    )
+
+    const phoneResolvido = await resolverTelefoneDoContato(chatId, instanceId)
+    const phoneRaw = phoneResolvido ?? senderPhone
+
+    console.log(
+      `[webhook] 📱 chatId="${chatId}" → phoneRaw="${phoneRaw}"` +
+      (phoneResolvido ? ' (resolvido via Evolution API)' : ' (fallback: senderPhone)')
     )
 
     // Passa o nome da etiqueta configurada (conversion_label) para ser salvo no lead
