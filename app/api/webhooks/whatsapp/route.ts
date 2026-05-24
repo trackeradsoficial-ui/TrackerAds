@@ -62,11 +62,18 @@ export async function POST(req: NextRequest) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Busca o cliente com estratégia dupla:
-//   1. Por whatsapp_instance = instanceId  (match exato com o ID da instância)
-//   2. Por whatsapp_number   = ownerPhone  (fallback pelo número do owner)
+// Busca o cliente com estratégia em 2 etapas:
 //
-// ownerJid: ex. "5519982250102@s.whatsapp.net" — extraímos apenas os dígitos
+//   1. Por whatsapp_number (número do owner da instância) — mais confiável.
+//      O número pode estar gravado no banco em qualquer um desses formatos:
+//        • 5519982250102   (com DDI 55)
+//        • 19982250102     (sem DDI)
+//        • 9982250102      (sem DDI e sem o 9 extra — raro)
+//      Por isso usamos LIKE com o sufixo mínimo do número para cobrir todos.
+//
+//   2. Fallback por whatsapp_instance = instanceId (nome/ID da instância).
+//
+// ownerJid: ex. "5519982250102@s.whatsapp.net" — extraímos só os dígitos.
 // ─────────────────────────────────────────────────────────────────────────────
 async function findClient(
   supabase: SupabaseClient,
@@ -77,11 +84,89 @@ async function findClient(
   const ownerPhone = ownerJid.split('@')[0].replace(/\D/g, '')
 
   console.log(
-    `[webhook] 🔍 Buscando cliente — instance="${instanceId}" | ownerPhone="${ownerPhone}"`
+    `[webhook] 🔍 Iniciando busca de cliente — instance="${instanceId}" | ownerJid="${ownerJid}" | ownerPhone="${ownerPhone}"`
   )
 
-  // ── Tentativa 1: por whatsapp_instance ───────────────────────────────────
+  // ── Etapa 1: busca flexível por whatsapp_number ───────────────────────────
+  // Monta lista de sufixos em ordem decrescente de especificidade.
+  // Ex.: ownerPhone = "5519982250102"
+  //   → suffixes = ["5519982250102", "19982250102", "9982250102"]
+  if (ownerPhone.length >= 8) {
+    const suffixes: string[] = [ownerPhone]
+
+    // Remove DDI 55 se o número tiver 13 dígitos (55 + DDD + 9 dígitos)
+    if (ownerPhone.startsWith('55') && ownerPhone.length === 13) {
+      const semDDI = ownerPhone.slice(2)        // "19982250102"
+      suffixes.push(semDDI)
+      // Remove também o nono dígito caso o banco tenha número de 8 dígitos
+      if (semDDI.length === 11) {
+        suffixes.push(semDDI.slice(0, 2) + semDDI.slice(3)) // "1982250102"
+      }
+    }
+
+    for (const suffix of suffixes) {
+      console.log(
+        `[webhook] 🔎 Tentando whatsapp_number LIKE "%${suffix}"`
+      )
+
+      const { data: client, error } = await supabase
+        .from('clients')
+        .select('id, pixel_id, capi_token, whatsapp_number, whatsapp_instance, is_active, conversion_label')
+        .like('whatsapp_number', `%${suffix}`)
+        .eq('is_active', true)
+        .maybeSingle()
+
+      if (error) {
+        console.error(
+          `[webhook] ⚠️  Erro ao buscar por whatsapp_number LIKE "%${suffix}":`,
+          error.message
+        )
+        continue
+      }
+
+      if (client) {
+        console.log(
+          `[webhook] ✅ Cliente encontrado via whatsapp_number (sufixo="${suffix}"): id="${client.id}" | número no banco="${client.whatsapp_number}"`
+        )
+
+        // Registra o instanceId automaticamente se ainda não estava salvo
+        if (instanceId && !client.whatsapp_instance) {
+          const { error: updateErr } = await supabase
+            .from('clients')
+            .update({ whatsapp_instance: instanceId })
+            .eq('id', client.id)
+
+          if (updateErr) {
+            console.warn(
+              `[webhook] ⚠️  Falha ao salvar whatsapp_instance para "${client.id}":`,
+              updateErr.message
+            )
+          } else {
+            console.log(
+              `[webhook] 💾 whatsapp_instance="${instanceId}" salvo automaticamente para cliente "${client.id}"`
+            )
+          }
+        }
+
+        return client
+      }
+
+      console.log(
+        `[webhook] ℹ️  Nenhum cliente com whatsapp_number LIKE "%${suffix}"`
+      )
+    }
+  } else {
+    console.warn(
+      `[webhook] ⚠️  ownerPhone muito curto ou ausente ("${ownerPhone}") — pulando busca por número`
+    )
+  }
+
+  // ── Etapa 2: fallback por whatsapp_instance ───────────────────────────────
   if (instanceId) {
+    console.log(
+      `[webhook] 🔎 Tentando fallback por whatsapp_instance="${instanceId}"`
+    )
+
     const { data: client, error } = await supabase
       .from('clients')
       .select('id, pixel_id, capi_token, whatsapp_number, whatsapp_instance, is_active, conversion_label')
@@ -91,55 +176,18 @@ async function findClient(
 
     if (!error && client) {
       console.log(
-        `[webhook] ✅ Cliente encontrado via whatsapp_instance: id="${client.id}"`
+        `[webhook] ✅ Cliente encontrado via whatsapp_instance="${instanceId}": id="${client.id}"`
       )
       return client
     }
 
     console.log(
-      `[webhook] ℹ️  Nenhum cliente com whatsapp_instance="${instanceId}" — tentando pelo número`
+      `[webhook] ℹ️  Nenhum cliente com whatsapp_instance="${instanceId}"`
     )
   }
 
-  // ── Tentativa 2: por whatsapp_number ─────────────────────────────────────
-  if (ownerPhone) {
-    // Tenta match direto e também sem código de país (remove "55" do início se tiver 13 dígitos)
-    const candidates = [ownerPhone]
-    if (ownerPhone.startsWith('55') && ownerPhone.length === 13) {
-      candidates.push(ownerPhone.slice(2)) // sem código do Brasil
-    }
-
-    for (const num of candidates) {
-      const { data: client, error } = await supabase
-        .from('clients')
-        .select('id, pixel_id, capi_token, whatsapp_number, whatsapp_instance, is_active, conversion_label')
-        .eq('whatsapp_number', num)
-        .eq('is_active', true)
-        .maybeSingle()
-
-      if (!error && client) {
-        console.log(
-          `[webhook] ✅ Cliente encontrado via whatsapp_number="${num}": id="${client.id}"`
-        )
-
-        // Aproveita para salvar o instanceId agora que identificamos o cliente
-        if (instanceId && !client.whatsapp_instance) {
-          await supabase
-            .from('clients')
-            .update({ whatsapp_instance: instanceId })
-            .eq('id', client.id)
-          console.log(
-            `[webhook] 💾 whatsapp_instance="${instanceId}" salvo para cliente "${client.id}"`
-          )
-        }
-
-        return client
-      }
-    }
-  }
-
   console.error(
-    `[webhook] ❌ Cliente NÃO encontrado — instance="${instanceId}" | ownerPhone="${ownerPhone}"`
+    `[webhook] ❌ Cliente NÃO encontrado após todas as tentativas — instance="${instanceId}" | ownerPhone="${ownerPhone}"`
   )
   return null
 }
