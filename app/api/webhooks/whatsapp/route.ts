@@ -84,6 +84,76 @@ async function sendCapiEvent(opts: {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Busca o nome de uma etiqueta pelo ID na Evolution API.
+//
+// GET {EVOLUTION_API_URL}/label/findLabels/{instanceName}
+// Header: apikey: {EVOLUTION_API_KEY}
+// Retorna array de { id: string, name: string, ... }
+//
+// Retorna o name da etiqueta com o id correspondente, ou null se não encontrar.
+// ─────────────────────────────────────────────────────────────────────────────
+async function buscarNomeEtiqueta(
+  instanceName: string,
+  labelId: string
+): Promise<string | null> {
+  const baseUrl = process.env.EVOLUTION_API_URL
+  const apiKey  = process.env.EVOLUTION_API_KEY
+
+  if (!baseUrl || !apiKey) {
+    console.error(
+      '[webhook] ❌ Variáveis EVOLUTION_API_URL ou EVOLUTION_API_KEY não configuradas'
+    )
+    return null
+  }
+
+  const url = `${baseUrl}/label/findLabels/${instanceName}`
+  console.log(`[webhook] 🔎 Buscando etiquetas na Evolution API: GET ${url}`)
+
+  try {
+    const res = await fetch(url, {
+      method:  'GET',
+      headers: { apikey: apiKey },
+    })
+
+    if (!res.ok) {
+      console.error(
+        `[webhook] ❌ Evolution API retornou status ${res.status} ao buscar etiquetas`
+      )
+      return null
+    }
+
+    const etiquetas = (await res.json()) as Array<Record<string, unknown>>
+    console.log(
+      `[webhook] 📋 Etiquetas retornadas pela Evolution API: ${JSON.stringify(etiquetas)}`
+    )
+
+    if (!Array.isArray(etiquetas)) {
+      console.error('[webhook] ❌ Resposta da Evolution API não é um array')
+      return null
+    }
+
+    const encontrada = etiquetas.find(
+      (e) => String(e.id) === String(labelId)
+    )
+
+    if (!encontrada) {
+      console.warn(
+        `[webhook] ⚠️  Etiqueta com id="${labelId}" não encontrada na lista da Evolution API`
+      )
+      return null
+    }
+
+    const nome = String(encontrada.name ?? '')
+    console.log(`[webhook] ✅ Nome da etiqueta id="${labelId}": "${nome}"`)
+    return nome || null
+
+  } catch (err) {
+    console.error('[webhook] ❌ Erro ao chamar Evolution API para buscar etiquetas:', err)
+    return null
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Busca o cliente pelo ownerPhone (ILIKE com candidatos) + fallback por
 // whatsapp_instance. Retorna null se não encontrar.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -400,18 +470,31 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true, ignorado: true })
     }
 
-    // Extrai nome da etiqueta — pode ser data.label.name ou data.label (string)
-    const labelObj  = data?.label
-    const labelName = typeof labelObj === 'object' && labelObj !== null
-      ? String((labelObj as Record<string, unknown>).name ?? '')
+    // Extrai o ID da etiqueta do payload
+    // O payload traz apenas o id — o name precisa ser buscado na Evolution API
+    const labelObj = data?.label
+    const labelId  = typeof labelObj === 'object' && labelObj !== null
+      ? String((labelObj as Record<string, unknown>).id ?? '')
       : String(labelObj ?? '')
 
-    console.log(`[webhook] 🏷️  Etiqueta recebida: "${labelName}"`)
+    console.log(`[webhook] 🏷️  ID da etiqueta recebida: "${labelId}"`)
 
-    if (!labelName) {
-      console.warn('[webhook] ⚠️  labels.association — sem nome de etiqueta — ignorando')
+    if (!labelId) {
+      console.warn('[webhook] ⚠️  labels.association — sem id de etiqueta — ignorando')
       return NextResponse.json({ ok: true, ignorado: true })
     }
+
+    // Busca o nome da etiqueta na Evolution API pelo ID
+    const labelName = await buscarNomeEtiqueta(instanceId, labelId)
+
+    if (!labelName) {
+      console.warn(
+        `[webhook] ⚠️  labels.association — não foi possível resolver o nome da etiqueta id="${labelId}" — ignorando`
+      )
+      return NextResponse.json({ ok: true, ignorado: true })
+    }
+
+    console.log(`[webhook] 🏷️  Nome resolvido da etiqueta: "${labelName}"`)
 
     // JID do contato que recebeu a etiqueta
     const contactId = String(data?.id ?? '')
