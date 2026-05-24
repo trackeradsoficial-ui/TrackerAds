@@ -26,6 +26,7 @@ export default async function ConversionsPage() {
   const { data: leads } = await supabase
     .from('leads')
     .select('id, client_id, phone_raw, label, created_at, facebook_event_sent, facebook_event_response')
+    .eq('status', 'converted')
     .order('created_at', { ascending: false })
 
   return (

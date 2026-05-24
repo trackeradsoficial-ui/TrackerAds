@@ -63,6 +63,7 @@ export default async function AdminDashboardPage() {
   const { data: allLeads } = await supabase
     .from('leads')
     .select('id, client_id, phone_raw, created_at, facebook_event_sent, label')
+    .eq('status', 'converted')
     .order('created_at', { ascending: false })
 
   const leads = allLeads ?? []

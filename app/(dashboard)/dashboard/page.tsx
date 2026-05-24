@@ -72,6 +72,7 @@ export default async function DashboardPage() {
     .from('leads')
     .select('*')
     .eq('client_id', profile.client_id)
+    .eq('status', 'converted')
     .order('created_at', { ascending: false })
 
   const allLeads       = (leads ?? []) as Lead[]
