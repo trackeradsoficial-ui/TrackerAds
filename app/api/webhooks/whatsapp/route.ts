@@ -2,13 +2,46 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { hashPhone, hashName, splitName, sendCapiEvent, type CapiContactData } from '@/lib/capi'
 
-// Instância singleton — criada uma vez no módulo com service role (ignora RLS)
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-)
+// ─────────────────────────────────────────────────────────────────────────────
+// Cliente Supabase — lazy singleton.
+// NÃO inicializar no topo do módulo: o Next.js avalia o módulo durante o build
+// e as variáveis de ambiente de servidor não estão disponíveis nesse momento,
+// causando "supabaseUrl is required". A instância é criada apenas em runtime,
+// na primeira requisição real.
+// ─────────────────────────────────────────────────────────────────────────────
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type AnySupabase = ReturnType<typeof createClient<any>>
+let _supabase: AnySupabase | null = null
 
-// Evolution API envia GET com hub.challenge para verificação do webhook
+function getSupabase(): AnySupabase {
+  if (!_supabase) {
+    const url = process.env.NEXT_PUBLIC_SUPABASE_URL
+    const key = process.env.SUPABASE_SERVICE_ROLE_KEY
+    if (!url || !key) {
+      throw new Error(
+        '[webhook] Variáveis de ambiente ausentes: NEXT_PUBLIC_SUPABASE_URL ou SUPABASE_SERVICE_ROLE_KEY'
+      )
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    _supabase = createClient<any>(url, key)
+  }
+  return _supabase
+}
+
+// Tipo explícito para o retorno da consulta de clientes — evita inferência 'never'
+type ClientRow = {
+  id: string
+  pixel_id: string
+  capi_token: string
+  whatsapp_number: string | null
+  whatsapp_instance: string | null
+  is_active: boolean
+  conversion_label: string | null
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET — Evolution API envia GET com hub.challenge para verificação do webhook
+// ─────────────────────────────────────────────────────────────────────────────
 export async function GET(req: NextRequest) {
   const challenge = req.nextUrl.searchParams.get('hub.challenge')
   if (challenge) return new NextResponse(challenge, { status: 200 })
@@ -44,7 +77,11 @@ export async function POST(req: NextRequest) {
   } catch (parseErr) {
     console.error('[webhook] 💥 Payload não é JSON válido:', parseErr)
     return NextResponse.json(
-      { error: 'Payload inválido — esperado JSON', detalhe: String(parseErr), payload: rawText.slice(0, 500) },
+      {
+        error:   'Payload inválido — esperado JSON',
+        detalhe: String(parseErr),
+        payload: rawText.slice(0, 500),
+      },
       { status: 400 }
     )
   }
@@ -110,11 +147,10 @@ export async function POST(req: NextRequest) {
 // Busca o cliente com estratégia em 2 etapas:
 //
 //   1. Por whatsapp_number (número do owner da instância) — mais confiável.
-//      O número pode estar gravado no banco em qualquer um desses formatos:
+//      Usa LIKE com sufixo para cobrir todos os formatos possíveis no banco:
 //        • 5519982250102   (com DDI 55)
 //        • 19982250102     (sem DDI)
-//        • 9982250102      (sem DDI e sem o 9 extra — raro)
-//      Por isso usamos LIKE com o sufixo mínimo do número para cobrir todos.
+//        • 1982250102      (sem DDI e sem nono dígito — números antigos)
 //
 //   2. Fallback por whatsapp_instance = instanceId (nome/ID da instância).
 //
@@ -123,7 +159,9 @@ export async function POST(req: NextRequest) {
 async function findClient(
   instanceId: string,
   ownerJid: string
-) {
+): Promise<ClientRow | null> {
+  const db = getSupabase()
+
   // Normaliza o número do owner: remove sufixo @* e não-dígitos
   const ownerPhone = ownerJid.split('@')[0].replace(/\D/g, '')
 
@@ -132,28 +170,23 @@ async function findClient(
   )
 
   // ── Etapa 1: busca flexível por whatsapp_number ───────────────────────────
-  // Monta lista de sufixos em ordem decrescente de especificidade.
-  // Ex.: ownerPhone = "5519982250102"
-  //   → suffixes = ["5519982250102", "19982250102", "1982250102"]
   if (ownerPhone.length >= 8) {
     const suffixes: string[] = [ownerPhone]
 
     // Remove DDI 55 se o número tiver 13 dígitos (55 + DDD + 9 dígitos)
     if (ownerPhone.startsWith('55') && ownerPhone.length === 13) {
-      const semDDI = ownerPhone.slice(2)        // "19982250102"
+      const semDDI = ownerPhone.slice(2)  // "19982250102"
       suffixes.push(semDDI)
-      // Remove também o nono dígito caso o banco tenha número antigo de 10 dígitos
+      // Remove também o nono dígito para números antigos de 10 dígitos
       if (semDDI.length === 11) {
-        suffixes.push(semDDI.slice(0, 2) + semDDI.slice(3)) // "1982250102"
+        suffixes.push(semDDI.slice(0, 2) + semDDI.slice(3))  // "1982250102"
       }
     }
 
     for (const suffix of suffixes) {
-      console.log(
-        `[webhook] 🔎 Tentando whatsapp_number LIKE "%${suffix}"`
-      )
+      console.log(`[webhook] 🔎 Tentando whatsapp_number LIKE "%${suffix}"`)
 
-      const { data: client, error } = await supabase
+      const { data: client, error } = await db
         .from('clients')
         .select('id, pixel_id, capi_token, whatsapp_number, whatsapp_instance, is_active, conversion_label')
         .like('whatsapp_number', `%${suffix}`)
@@ -169,35 +202,34 @@ async function findClient(
       }
 
       if (client) {
+        const row = client as ClientRow
         console.log(
-          `[webhook] ✅ Cliente encontrado via whatsapp_number (sufixo="${suffix}"): id="${client.id}" | número no banco="${client.whatsapp_number}"`
+          `[webhook] ✅ Cliente encontrado via whatsapp_number (sufixo="${suffix}"): id="${row.id}" | número no banco="${row.whatsapp_number}"`
         )
 
         // Registra o instanceId automaticamente se ainda não estava salvo
-        if (instanceId && !client.whatsapp_instance) {
-          const { error: updateErr } = await supabase
+        if (instanceId && !row.whatsapp_instance) {
+          const { error: updateErr } = await db
             .from('clients')
             .update({ whatsapp_instance: instanceId })
-            .eq('id', client.id)
+            .eq('id', row.id)
 
           if (updateErr) {
             console.warn(
-              `[webhook] ⚠️  Falha ao salvar whatsapp_instance para "${client.id}":`,
+              `[webhook] ⚠️  Falha ao salvar whatsapp_instance para "${row.id}":`,
               updateErr.message
             )
           } else {
             console.log(
-              `[webhook] 💾 whatsapp_instance="${instanceId}" salvo automaticamente para cliente "${client.id}"`
+              `[webhook] 💾 whatsapp_instance="${instanceId}" salvo automaticamente para cliente "${row.id}"`
             )
           }
         }
 
-        return client
+        return row
       }
 
-      console.log(
-        `[webhook] ℹ️  Nenhum cliente com whatsapp_number LIKE "%${suffix}"`
-      )
+      console.log(`[webhook] ℹ️  Nenhum cliente com whatsapp_number LIKE "%${suffix}"`)
     }
   } else {
     console.warn(
@@ -207,11 +239,9 @@ async function findClient(
 
   // ── Etapa 2: fallback por whatsapp_instance ───────────────────────────────
   if (instanceId) {
-    console.log(
-      `[webhook] 🔎 Tentando fallback por whatsapp_instance="${instanceId}"`
-    )
+    console.log(`[webhook] 🔎 Tentando fallback por whatsapp_instance="${instanceId}"`)
 
-    const { data: client, error } = await supabase
+    const { data: client, error } = await db
       .from('clients')
       .select('id, pixel_id, capi_token, whatsapp_number, whatsapp_instance, is_active, conversion_label')
       .eq('whatsapp_instance', instanceId)
@@ -219,15 +249,14 @@ async function findClient(
       .maybeSingle()
 
     if (!error && client) {
+      const row = client as ClientRow
       console.log(
-        `[webhook] ✅ Cliente encontrado via whatsapp_instance="${instanceId}": id="${client.id}"`
+        `[webhook] ✅ Cliente encontrado via whatsapp_instance="${instanceId}": id="${row.id}"`
       )
-      return client
+      return row
     }
 
-    console.log(
-      `[webhook] ℹ️  Nenhum cliente com whatsapp_instance="${instanceId}"`
-    )
+    console.log(`[webhook] ℹ️  Nenhum cliente com whatsapp_instance="${instanceId}"`)
   }
 
   console.error(
@@ -246,6 +275,7 @@ async function handleContactsUpsert(
   data: unknown
 ): Promise<NextResponse> {
   try {
+    const db = getSupabase()
     const instanceId: string =
       (body?.instance as string) ?? (body?.instanceName as string) ?? ''
 
@@ -274,7 +304,6 @@ async function handleContactsUpsert(
     for (const item of items) {
       try {
         const c = item as Record<string, unknown>
-
         const jid: string = (c?.id as string) ?? (c?.remoteJid as string) ?? ''
 
         // Ignora grupos e broadcasts
@@ -284,16 +313,14 @@ async function handleContactsUpsert(
         if (!phone) continue
 
         const name: string =
-          (c?.pushName       as string) ??
-          (c?.name           as string) ??
-          (c?.verifiedName   as string) ??
+          (c?.pushName     as string) ??
+          (c?.name         as string) ??
+          (c?.verifiedName as string) ??
           ''
 
-        console.log(
-          `[webhook/contacts] 💾 Upsert: phone="${phone}" name="${name}"`
-        )
+        console.log(`[webhook/contacts] 💾 Upsert: phone="${phone}" name="${name}"`)
 
-        const { error } = await supabase
+        const { error } = await db
           .from('contacts')
           .upsert(
             { client_id: client.id, phone, name: name || null },
@@ -335,6 +362,7 @@ async function handleChatsUpdate(
   data: unknown
 ): Promise<NextResponse> {
   try {
+    const db = getSupabase()
     const instanceId: string =
       (body?.instance as string) ?? (body?.instanceName as string) ?? ''
 
@@ -368,14 +396,16 @@ async function handleChatsUpdate(
           (c?.id as string) ?? (c?.remoteJid as string) ?? ''
 
         if (!remoteJid || remoteJid.includes('@g.us')) {
-          console.warn(`[webhook/chats] ⚠️  Chat [${idx + 1}] sem JID válido ("${remoteJid}") — ignorando`)
+          console.warn(
+            `[webhook/chats] ⚠️  Chat [${idx + 1}] sem JID válido ("${remoteJid}") — ignorando`
+          )
           resultados.push({ chat: remoteJid || `[${idx + 1}]`, resultado: 'ignorado — sem JID válido' })
           continue
         }
 
-        // owner: tenta no item do chat primeiro, depois no body (sender), depois no instanceId
+        // owner: tenta no item do chat primeiro, depois no body (sender)
         const ownerJid: string =
-          (c?.owner  as string) ??
+          (c?.owner     as string) ??
           (body?.sender as string) ??
           ''
 
@@ -425,7 +455,10 @@ async function handleChatsUpdate(
           console.log(
             `[webhook/chats] ⏭️  Etiqueta "${labelEsperada}" não detectada em [${labelsNormalizadas.join(', ')}] — ignorando`
           )
-          resultados.push({ chat: remoteJid, resultado: `ignorado — etiqueta "${labelEsperada}" não presente` })
+          resultados.push({
+            chat: remoteJid,
+            resultado: `ignorado — etiqueta "${labelEsperada}" não presente`,
+          })
           continue
         }
 
@@ -434,20 +467,20 @@ async function handleChatsUpdate(
         // ── Busca nome do contato ───────────────────────────────────────────
         const phoneNormalizado = phoneRaw.replace(/\D/g, '')
 
-        const { data: contactRow } = await supabase
+        const { data: contactRow } = await db
           .from('contacts')
           .select('name')
           .eq('client_id', client.id)
           .eq('phone', phoneNormalizado)
           .maybeSingle()
 
-        const nomeCompleto: string = contactRow?.name ?? ''
+        const nomeCompleto: string = (contactRow as { name?: string } | null)?.name ?? ''
         console.log(
           `[webhook/chats] 👤 Nome do contato: "${nomeCompleto || '(não encontrado)'}"`
         )
 
         // ── Monta dados para o CAPI ─────────────────────────────────────────
-        const phoneHashed = hashPhone(phoneRaw)
+        const phoneHashed               = hashPhone(phoneRaw)
         const capiContact: CapiContactData = { phoneHashed }
 
         if (nomeCompleto) {
@@ -463,7 +496,7 @@ async function handleChatsUpdate(
         }
 
         // ── Salva lead ──────────────────────────────────────────────────────
-        const { data: lead, error: leadError } = await supabase
+        const { data: lead, error: leadError } = await db
           .from('leads')
           .insert({
             client_id:           client.id,
@@ -477,12 +510,19 @@ async function handleChatsUpdate(
           .single()
 
         if (leadError || !lead) {
-          console.error('[webhook/chats] ❌ Erro ao salvar lead:', leadError?.message ?? 'retorno nulo')
-          resultados.push({ chat: remoteJid, resultado: `erro ao salvar lead: ${leadError?.message ?? 'retorno nulo'}` })
+          console.error(
+            '[webhook/chats] ❌ Erro ao salvar lead:',
+            leadError?.message ?? 'retorno nulo'
+          )
+          resultados.push({
+            chat: remoteJid,
+            resultado: `erro ao salvar lead: ${leadError?.message ?? 'retorno nulo'}`,
+          })
           continue
         }
 
-        console.log(`[webhook/chats] ✅ Lead salvo: id="${lead.id}"`)
+        const leadRow = lead as { id: string }
+        console.log(`[webhook/chats] ✅ Lead salvo: id="${leadRow.id}"`)
 
         // ── Dispara evento Purchase no Facebook CAPI ────────────────────────
         console.log(
@@ -503,13 +543,16 @@ async function handleChatsUpdate(
           `[webhook/chats] ${success ? '✅' : '❌'} CAPI: sucesso=${success} | ${JSON.stringify(capiResponse)}`
         )
 
-        await supabase
+        await db
           .from('leads')
           .update({ facebook_event_sent: success, facebook_event_response: capiResponse })
-          .eq('id', lead.id)
+          .eq('id', leadRow.id)
 
-        console.log(`[webhook/chats] 🏁 Lead "${lead.id}" finalizado`)
-        resultados.push({ chat: remoteJid, resultado: `lead=${lead.id} | capi=${success ? 'enviado' : 'falhou'}` })
+        console.log(`[webhook/chats] 🏁 Lead "${leadRow.id}" finalizado`)
+        resultados.push({
+          chat: remoteJid,
+          resultado: `lead=${leadRow.id} | capi=${success ? 'enviado' : 'falhou'}`,
+        })
 
       } catch (chatErr) {
         const mensagem = chatErr instanceof Error ? chatErr.message : String(chatErr)
