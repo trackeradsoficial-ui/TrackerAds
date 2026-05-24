@@ -1,14 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { createClient, SupabaseClient } from '@supabase/supabase-js'
+import { createClient } from '@supabase/supabase-js'
 import { hashPhone, hashName, splitName, sendCapiEvent, type CapiContactData } from '@/lib/capi'
 
-// Cliente com service role — ignora RLS no processamento de webhooks
-function getServiceClient() {
-  return createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-  )
-}
+// Instância singleton — criada uma vez no módulo com service role (ignora RLS)
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.SUPABASE_SERVICE_ROLE_KEY!
+)
 
 // Evolution API envia GET com hub.challenge para verificação do webhook
 export async function GET(req: NextRequest) {
@@ -123,7 +121,6 @@ export async function POST(req: NextRequest) {
 // ownerJid: ex. "5519982250102@s.whatsapp.net" — extraímos só os dígitos.
 // ─────────────────────────────────────────────────────────────────────────────
 async function findClient(
-  supabase: SupabaseClient,
   instanceId: string,
   ownerJid: string
 ) {
@@ -264,8 +261,7 @@ async function handleContactsUpsert(
       `[webhook/contacts] 👥 CONTACTS_UPSERT — instance="${instanceId}" | owner="${ownerJid}" | ${items.length} contato(s)`
     )
 
-    const supabase = getServiceClient()
-    const client   = await findClient(supabase, instanceId, ownerJid)
+    const client = await findClient(instanceId, ownerJid)
 
     if (!client) {
       console.warn('[webhook/contacts] ⚠️  Cliente não identificado — ignorando')
@@ -388,8 +384,7 @@ async function handleChatsUpdate(
           `[webhook/chats] 📱 remoteJid="${remoteJid}" | phoneRaw="${phoneRaw}" | ownerJid="${ownerJid}"`
         )
 
-        const supabase = getServiceClient()
-        const client   = await findClient(supabase, instanceId, ownerJid)
+        const client = await findClient(instanceId, ownerJid)
 
         if (!client) {
           console.warn(`[webhook/chats] ⚠️  Chat [${idx + 1}] — cliente não identificado — ignorando`)
