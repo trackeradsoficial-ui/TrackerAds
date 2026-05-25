@@ -2,10 +2,6 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import crypto from 'crypto'
 
-// Cache em memória: guarda o timestamp (ms) do último type=add por chave "instance:labelId"
-// Usado para detectar removes que são efeito colateral do WhatsApp (chegam logo após um add)
-const lastAddTimestamp = new Map<string, number>()
-const ADD_GRACE_PERIOD_MS = 10_000 // 10 segundos
 
 interface ClientRow {
   id: string
@@ -130,25 +126,11 @@ export async function POST(req: NextRequest) {
     if (event !== 'labels.association' && event !== 'labels.edit') {
       return NextResponse.json({ ok: true })
     }
-    if (type !== 'add' && type !== 'remove') {
+    if (type !== 'add') {
       return NextResponse.json({ ok: true })
     }
     if (!labelId || !chatId || !instance) {
       return NextResponse.json({ ok: true })
-    }
-
-    const cacheKey = `${instance}:${labelId}`
-
-    if (type === 'add') {
-      lastAddTimestamp.set(cacheKey, Date.now())
-    }
-
-    if (type === 'remove') {
-      const lastAdd = lastAddTimestamp.get(cacheKey)
-      if (lastAdd && Date.now() - lastAdd < ADD_GRACE_PERIOD_MS) {
-        console.log(`[webhook] remove ignorado (efeito colateral do WhatsApp) labelId=${labelId} instance=${instance}`)
-        return NextResponse.json({ ok: true })
-      }
     }
 
     console.log(`[webhook] ${event} type=${type} labelId=${labelId} chatId=${chatId}`)
@@ -168,17 +150,6 @@ export async function POST(req: NextRequest) {
     }
 
     const contactPhone = chatId.replace('@s.whatsapp.net', '').replace('@lid', '')
-
-    if (type === 'remove') {
-      await supabase
-        .from('leads')
-        .update({ status: 'cancelled' })
-        .eq('client_id', client.id)
-        .eq('phone_raw', contactPhone)
-        .eq('status', 'converted')
-      console.log(`[webhook] cancelado: ${contactPhone}`)
-      return NextResponse.json({ ok: true })
-    }
 
     await registrarConversao(supabase, client, contactPhone)
     return NextResponse.json({ ok: true })
