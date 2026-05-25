@@ -17,19 +17,20 @@ async function registrarConversao(
   client: ClientRow,
   contactPhone: string
 ): Promise<void> {
-  // Ignorar se já existe um lead convertido criado nos últimos 5 segundos (duplicata rápida)
-  const fiveSecondsAgo = new Date(Date.now() - 5_000).toISOString()
-  const { data: existing } = await supabase
-    .from('leads')
-    .select('id, created_at')
+  // Ignorar se houve um type=remove nos últimos 30 segundos para esse contato
+  // (indica que o WhatsApp disparou add como efeito colateral após reorganizar labels)
+  const thirtySecondsAgo = new Date(Date.now() - 30_000).toISOString()
+  const { data: recentRemove } = await supabase
+    .from('webhook_events')
+    .select('id')
     .eq('client_id', client.id)
     .eq('phone_raw', contactPhone)
-    .eq('status', 'converted')
-    .gte('created_at', fiveSecondsAgo)
+    .eq('event_type', 'remove')
+    .gte('created_at', thirtySecondsAgo)
     .maybeSingle()
 
-  if (existing) {
-    console.log(`[webhook] duplicata recente ignorada: ${contactPhone}`)
+  if (recentRemove) {
+    console.log(`[webhook] add ignorado — remove recente detectado para: ${contactPhone}`)
     return
   }
 
@@ -155,6 +156,11 @@ export async function POST(req: NextRequest) {
     const contactPhone = chatId.replace('@s.whatsapp.net', '').replace('@lid', '')
 
     if (type === 'remove') {
+      // Registrar o evento de remove para bloquear adds colaterais nos próximos 30s
+      await supabase
+        .from('webhook_events')
+        .insert({ client_id: client.id, phone_raw: contactPhone, event_type: 'remove' })
+
       // Só cancela se existir lead convertido para esse contato
       const { data: lead } = await supabase
         .from('leads')
@@ -165,7 +171,7 @@ export async function POST(req: NextRequest) {
         .maybeSingle()
 
       if (!lead) {
-        console.log(`[webhook] remove ignorado — sem lead convertido para: ${contactPhone}`)
+        console.log(`[webhook] remove registrado — sem lead convertido para cancelar: ${contactPhone}`)
         return NextResponse.json({ ok: true })
       }
 
