@@ -19,6 +19,11 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true, resultado: 'evento ignorado' })
     }
 
+    // Log completo do payload do labels.edit para inspecionar o formato
+    if (event === 'labels.edit') {
+      console.log('[webhook] labels.edit payload completo:', JSON.stringify(body, null, 2))
+    }
+
     // 2. Extrair dados do evento
     const type = String(body.data?.type || '')
     const labelId = String(body.data?.labelId || '')
