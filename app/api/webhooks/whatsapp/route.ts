@@ -14,7 +14,7 @@ interface ClientRow {
 async function registrarConversao(supabase: any, client: ClientRow, contactPhone: string): Promise<void> {
   const phoneHashed = crypto.createHash('sha256').update(contactPhone).digest('hex')
 
-  const { data: lead } = await supabase
+  const { data: lead, error: insertError } = await supabase
     .from('leads')
     .insert({
       client_id: client.id,
@@ -27,27 +27,40 @@ async function registrarConversao(supabase: any, client: ClientRow, contactPhone
     .select()
     .single()
 
-  const capiRes = await fetch(`https://graph.facebook.com/v19.0/${client.pixel_id}/events`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      data: [{
-        event_name: 'Purchase',
-        event_time: Math.floor(Date.now() / 1000),
-        user_data: { ph: [phoneHashed] },
-        custom_data: { currency: 'BRL', value: 0 },
-      }],
-      access_token: client.capi_token,
-    }),
-  })
+  if (insertError) {
+    console.error(`[webhook] erro ao inserir lead: ${JSON.stringify(insertError)}`)
+    return
+  }
 
-  const capiData = await capiRes.json()
+  console.log(`[webhook] lead inserido: ${lead?.id} para ${contactPhone}`)
+
+  let capiData: any = null
+  try {
+    const capiRes = await fetch(`https://graph.facebook.com/v19.0/${client.pixel_id}/events`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        data: [{
+          event_name: 'Purchase',
+          event_time: Math.floor(Date.now() / 1000),
+          user_data: { ph: [phoneHashed] },
+          custom_data: { currency: 'BRL', value: 0 },
+        }],
+        access_token: client.capi_token,
+      }),
+    })
+    capiData = await capiRes.json()
+    console.log(`[webhook] CAPI resposta: ${JSON.stringify(capiData)}`)
+  } catch (capiErr: any) {
+    console.error(`[webhook] erro na chamada CAPI: ${capiErr.message}`)
+  }
+
   await supabase
     .from('leads')
-    .update({ facebook_event_sent: true, facebook_event_response: capiData })
+    .update({ facebook_event_sent: !!capiData?.events_received, facebook_event_response: capiData })
     .eq('id', lead?.id)
 
-  console.log(`[webhook] registrado: ${contactPhone} CAPI:${capiData.events_received}`)
+  console.log(`[webhook] registrado: ${contactPhone} CAPI:${capiData?.events_received ?? 'erro'}`)
 }
 
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
