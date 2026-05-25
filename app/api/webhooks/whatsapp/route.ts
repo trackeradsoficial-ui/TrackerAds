@@ -10,45 +10,28 @@ export async function POST(req: NextRequest) {
     )
 
     const body = await req.json()
-    const event = body.event
-    console.log('[webhook] evento recebido:', event, '| type:', body.data?.type)
-
-    // 1. Aceitar apenas labels.association e labels.edit
-    if (event !== 'labels.association' && event !== 'labels.edit') {
-      console.log('[webhook] evento ignorado:', event)
-      return NextResponse.json({ ok: true, resultado: 'evento ignorado' })
-    }
-
-    // Log completo do payload do labels.edit para inspecionar o formato
-    if (event === 'labels.edit') {
-      console.log('[webhook] labels.edit payload completo:', JSON.stringify(body, null, 2))
-    }
-
-    // 2. Extrair dados do evento
+    const event = String(body.event || '')
     const type = String(body.data?.type || '')
     const labelId = String(body.data?.labelId || '')
     const chatId = String(body.data?.chatId || '')
     const instance = String(body.instance || '')
 
-    console.log(`[webhook] type=${type} | labelId=${labelId} | chatId=${chatId} | instance=${instance}`)
+    console.log(`[webhook] event=${event} type=${type} labelId=${labelId} chatId=${chatId}`)
 
-    // 3. Ignorar types que não sejam add ou remove
+    // Só processa labels.association com type add ou remove
+    if (event !== 'labels.association') {
+      return NextResponse.json({ ok: true, msg: 'evento ignorado' })
+    }
+
     if (type !== 'add' && type !== 'remove') {
-      console.log('[webhook] type ignorado:', type)
-      return NextResponse.json({ ok: true, resultado: 'type ignorado' })
+      return NextResponse.json({ ok: true, msg: 'type ignorado' })
     }
 
-    // 4. Extrair telefone do contato a partir do chatId
-    const contactPhone = chatId
-      .replace('@s.whatsapp.net', '')
-      .replace('@lid', '')
-
-    if (!contactPhone) {
-      console.log('[webhook] chatId inválido:', chatId)
-      return NextResponse.json({ ok: true, resultado: 'chatId inválido' })
+    if (!labelId || !chatId || !instance) {
+      return NextResponse.json({ ok: true, msg: 'dados incompletos' })
     }
 
-    // 5. Buscar cliente pela instância
+    // Busca cliente pela instância
     const { data: clients } = await supabase
       .from('clients')
       .select('*')
@@ -56,78 +39,59 @@ export async function POST(req: NextRequest) {
       .limit(1)
 
     if (!clients || clients.length === 0) {
-      console.log('[webhook] cliente não encontrado para instance:', instance)
-      return NextResponse.json({ ok: true, resultado: 'cliente não encontrado' })
+      console.log(`[webhook] cliente não encontrado para instance=${instance}`)
+      return NextResponse.json({ ok: true, msg: 'cliente não encontrado' })
     }
 
     const client = clients[0]
-    const conversionLabelId = String(client.conversion_label_id || '')
 
-    console.log(`[webhook] cliente: ${client.company_name} | conversionLabelId esperado: ${conversionLabelId} | labelId recebido: ${labelId}`)
-
-    // 6. Verificar se a etiqueta é a de conversão ANTES de qualquer ação
-    if (labelId !== conversionLabelId) {
-      console.log('[webhook] etiqueta não é de conversão — ignorado')
-      return NextResponse.json({ ok: true, resultado: 'etiqueta não é de conversão' })
+    // Verifica se é a etiqueta de conversão
+    if (labelId !== String(client.conversion_label_id || '')) {
+      console.log(`[webhook] labelId=${labelId} não é conversão (esperado=${client.conversion_label_id})`)
+      return NextResponse.json({ ok: true, msg: 'etiqueta não é de conversão' })
     }
 
-    // 7. Cancelar conversão do contato específico
+    // Extrai telefone do contato
+    const contactPhone = chatId.replace('@s.whatsapp.net', '').replace('@lid', '')
+
     if (type === 'remove') {
-      const { error } = await supabase
+      await supabase
         .from('leads')
         .update({ status: 'cancelled' })
         .eq('client_id', client.id)
         .eq('phone_raw', contactPhone)
         .eq('status', 'converted')
-
-      if (error) {
-        console.error('[webhook] erro ao cancelar:', error.message)
-        return NextResponse.json({ error: error.message }, { status: 500 })
-      }
-
-      console.log('[webhook] conversão cancelada para:', contactPhone)
-      return NextResponse.json({ ok: true, resultado: 'conversão cancelada' })
+      console.log(`[webhook] conversão cancelada: ${contactPhone}`)
+      return NextResponse.json({ ok: true, msg: 'cancelado' })
     }
 
-    // 8. Registrar conversão (type === 'add')
-
-    // Verificar duplicata nas últimas 24h
-    const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
+    // type === 'add' — verifica duplicata
     const { data: existing } = await supabase
       .from('leads')
       .select('id')
       .eq('client_id', client.id)
       .eq('phone_raw', contactPhone)
       .eq('status', 'converted')
-      .gte('created_at', since)
       .maybeSingle()
 
     if (existing) {
-      console.log('[webhook] duplicata ignorada para:', contactPhone)
-      return NextResponse.json({ ok: true, resultado: 'duplicata ignorada' })
+      console.log(`[webhook] duplicata ignorada: ${contactPhone}`)
+      return NextResponse.json({ ok: true, msg: 'duplicata' })
     }
 
+    // Salva lead
     const phoneHashed = crypto.createHash('sha256').update(contactPhone).digest('hex')
 
-    const { data: lead, error: insertError } = await supabase
-      .from('leads')
-      .insert({
-        client_id: client.id,
-        phone_raw: contactPhone,
-        phone_hashed: phoneHashed,
-        label: client.conversion_label || 'Comprou',
-        status: 'converted',
-        facebook_event_sent: false
-      })
-      .select()
-      .single()
+    const { data: lead } = await supabase.from('leads').insert({
+      client_id: client.id,
+      phone_raw: contactPhone,
+      phone_hashed: phoneHashed,
+      label: client.conversion_label || 'Comprou',
+      status: 'converted',
+      facebook_event_sent: false
+    }).select().single()
 
-    if (insertError) {
-      console.error('[webhook] erro ao inserir lead:', insertError.message)
-      return NextResponse.json({ error: insertError.message }, { status: 500 })
-    }
-
-    // Enviar evento ao CAPI do Facebook
+    // Envia para Facebook CAPI
     const capiRes = await fetch(
       `https://graph.facebook.com/v19.0/${client.pixel_id}/events`,
       {
@@ -146,20 +110,16 @@ export async function POST(req: NextRequest) {
     )
 
     const capiData = await capiRes.json()
+    await supabase.from('leads').update({
+      facebook_event_sent: true,
+      facebook_event_response: capiData
+    }).eq('id', lead?.id)
 
-    await supabase
-      .from('leads')
-      .update({
-        facebook_event_sent: true,
-        facebook_event_response: capiData
-      })
-      .eq('id', lead?.id)
-
-    console.log('[webhook] conversão registrada para:', contactPhone, '| CAPI eventos recebidos:', capiData.events_received)
-    return NextResponse.json({ ok: true, resultado: 'conversão registrada' })
+    console.log(`[webhook] conversão registrada: ${contactPhone} | CAPI: ${capiData.events_received}`)
+    return NextResponse.json({ ok: true, msg: 'conversão registrada' })
 
   } catch (e: any) {
-    console.error('[webhook] erro inesperado:', e.message)
+    console.error('[webhook] erro:', e.message)
     return NextResponse.json({ error: e.message }, { status: 500 })
   }
 }
