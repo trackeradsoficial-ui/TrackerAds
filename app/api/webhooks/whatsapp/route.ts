@@ -2,6 +2,11 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import crypto from 'crypto'
 
+// Cache em memória: guarda o timestamp (ms) do último type=add por chave "instance:labelId"
+// Usado para detectar removes que são efeito colateral do WhatsApp (chegam logo após um add)
+const lastAddTimestamp = new Map<string, number>()
+const ADD_GRACE_PERIOD_MS = 10_000 // 10 segundos
+
 export async function POST(req: NextRequest) {
   try {
     const supabase = createClient(
@@ -25,6 +30,20 @@ export async function POST(req: NextRequest) {
     }
     if (!labelId || !chatId || !instance) {
       return NextResponse.json({ ok: true })
+    }
+
+    const cacheKey = `${instance}:${labelId}`
+
+    if (type === 'add') {
+      lastAddTimestamp.set(cacheKey, Date.now())
+    }
+
+    if (type === 'remove') {
+      const lastAdd = lastAddTimestamp.get(cacheKey)
+      if (lastAdd && Date.now() - lastAdd < ADD_GRACE_PERIOD_MS) {
+        console.log(`[webhook] remove ignorado (efeito colateral do WhatsApp) labelId=${labelId} instance=${instance}`)
+        return NextResponse.json({ ok: true })
+      }
     }
 
     console.log(`[webhook] labels.association type=${type} labelId=${labelId} chatId=${chatId}`)
