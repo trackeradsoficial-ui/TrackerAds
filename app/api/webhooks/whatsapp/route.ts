@@ -55,10 +55,14 @@ async function registrarConversao(supabase: any, client: ClientRow, contactPhone
     console.error(`[webhook] erro na chamada CAPI: ${capiErr.message}`)
   }
 
-  await supabase
+  const { error: updateError } = await supabase
     .from('leads')
-    .update({ facebook_event_sent: !!capiData?.events_received, facebook_event_response: capiData })
+    .update({ facebook_event_sent: true, facebook_event_response: capiData })
     .eq('id', lead?.id)
+
+  if (updateError) {
+    console.error('[webhook] erro ao atualizar lead:', updateError.message)
+  }
 
   console.log(`[webhook] registrado: ${contactPhone} CAPI:${capiData?.events_received ?? 'erro'}`)
 }
