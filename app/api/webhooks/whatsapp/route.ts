@@ -22,7 +22,7 @@ export async function POST(req: NextRequest) {
     const instance = String(body.instance || '')
 
     // IGNORA TUDO exceto labels.association com type add/remove e campos preenchidos
-    if (event !== 'labels.association') {
+    if (event !== 'labels.association' && event !== 'labels.edit') {
       return NextResponse.json({ ok: true })
     }
     if (type !== 'add' && type !== 'remove') {
