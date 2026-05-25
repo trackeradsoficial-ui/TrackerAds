@@ -17,16 +17,19 @@ async function registrarConversao(
   client: ClientRow,
   contactPhone: string
 ): Promise<void> {
+  // Ignorar se já existe um lead convertido criado nos últimos 5 segundos (duplicata rápida)
+  const fiveSecondsAgo = new Date(Date.now() - 5_000).toISOString()
   const { data: existing } = await supabase
     .from('leads')
-    .select('id')
+    .select('id, created_at')
     .eq('client_id', client.id)
     .eq('phone_raw', contactPhone)
     .eq('status', 'converted')
+    .gte('created_at', fiveSecondsAgo)
     .maybeSingle()
 
   if (existing) {
-    console.log(`[webhook] duplicata: ${contactPhone}`)
+    console.log(`[webhook] duplicata recente ignorada: ${contactPhone}`)
     return
   }
 
@@ -126,7 +129,7 @@ export async function POST(req: NextRequest) {
     if (event !== 'labels.association' && event !== 'labels.edit') {
       return NextResponse.json({ ok: true })
     }
-    if (type !== 'add') {
+    if (type !== 'add' && type !== 'remove') {
       return NextResponse.json({ ok: true })
     }
     if (!labelId || !chatId || !instance) {
@@ -150,6 +153,30 @@ export async function POST(req: NextRequest) {
     }
 
     const contactPhone = chatId.replace('@s.whatsapp.net', '').replace('@lid', '')
+
+    if (type === 'remove') {
+      // Só cancela se existir lead convertido para esse contato
+      const { data: lead } = await supabase
+        .from('leads')
+        .select('id')
+        .eq('client_id', client.id)
+        .eq('phone_raw', contactPhone)
+        .eq('status', 'converted')
+        .maybeSingle()
+
+      if (!lead) {
+        console.log(`[webhook] remove ignorado — sem lead convertido para: ${contactPhone}`)
+        return NextResponse.json({ ok: true })
+      }
+
+      await supabase
+        .from('leads')
+        .update({ status: 'cancelled' })
+        .eq('id', lead.id)
+
+      console.log(`[webhook] cancelado: ${contactPhone}`)
+      return NextResponse.json({ ok: true })
+    }
 
     await registrarConversao(supabase, client, contactPhone)
     return NextResponse.json({ ok: true })
