@@ -68,29 +68,36 @@ export async function GET(
   }
 
   // 2. Conectar — v2.2.3 retorna { code, base64 }
-  const connectRes = await fetch(`${EVOLUTION_URL}/instance/connect/${id}`, {
-    headers: { apikey: EVOLUTION_KEY },
-  })
+  // Tenta até 3 vezes com intervalo de 3s (QR Code pode demorar para ser gerado)
+  let base64: string | null = null
+  for (let i = 0; i < 3; i++) {
+    const connectRes = await fetch(`${EVOLUTION_URL}/instance/connect/${id}`, {
+      headers: { apikey: EVOLUTION_KEY },
+    })
 
-  if (!connectRes.ok) {
-    const err = await connectRes.text()
-    console.error('[qrcode] Erro ao conectar instância:', err)
-    return NextResponse.json(
-      { error: `Erro ao obter QR Code: ${err}` },
-      { status: 502 }
-    )
+    if (!connectRes.ok) {
+      const err = await connectRes.text()
+      console.error(`[qrcode] Erro ao conectar instância (tentativa ${i + 1}):`, err)
+      return NextResponse.json(
+        { error: `Erro ao obter QR Code: ${err}` },
+        { status: 502 }
+      )
+    }
+
+    const connectData = await connectRes.json()
+    base64 = connectData?.base64 || connectData?.qrcode?.base64 || null
+
+    if (base64) break
+
+    console.log(`[qrcode] base64 nulo na tentativa ${i + 1}, aguardando 3s...`)
+    await new Promise(r => setTimeout(r, 3000))
   }
 
-  const connectData = await connectRes.json()
-
-  // Evolution API v2.2.3 retorna { code, base64 }
-  const base64 = connectData?.base64 ?? null
-
   if (!base64) {
-    console.error('[qrcode] base64 não encontrado:', JSON.stringify(connectData))
+    console.error('[qrcode] QR Code não gerado após 3 tentativas')
     return NextResponse.json(
-      { error: 'QR Code não encontrado na resposta da Evolution API', raw: connectData },
-      { status: 502 }
+      { error: 'QR Code ainda sendo gerado' },
+      { status: 202 }
     )
   }
 
