@@ -161,6 +161,21 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true })
     }
 
+    // Verificar se lead foi cancelado nos últimos 60s (remove acabou de acontecer)
+    const { data: recentCancelled } = await supabase
+      .from('leads')
+      .select('id')
+      .eq('client_id', client.id)
+      .eq('phone_raw', contactPhone)
+      .eq('status', 'cancelled')
+      .gte('updated_at', sixtySecondsAgo)
+      .maybeSingle()
+
+    if (recentCancelled) {
+      console.log(`[webhook] add ignorado — lead cancelado recentemente para: ${contactPhone}`)
+      return NextResponse.json({ ok: true })
+    }
+
     await registrarConversao(supabase, client, contactPhone)
     return NextResponse.json({ ok: true })
 
