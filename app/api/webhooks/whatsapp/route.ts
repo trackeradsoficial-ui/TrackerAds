@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import crypto from 'crypto'
 
-
 interface ClientRow {
   id: string
   conversion_label_id: string | null
@@ -12,28 +11,7 @@ interface ClientRow {
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function registrarConversao(
-  supabase: any,
-  client: ClientRow,
-  contactPhone: string
-): Promise<void> {
-  // Ignorar se houve um type=remove nos últimos 30 segundos para esse contato
-  // (indica que o WhatsApp disparou add como efeito colateral após reorganizar labels)
-  const thirtySecondsAgo = new Date(Date.now() - 30_000).toISOString()
-  const { data: recentRemove } = await supabase
-    .from('webhook_events')
-    .select('id')
-    .eq('client_id', client.id)
-    .eq('phone_raw', contactPhone)
-    .eq('event_type', 'remove')
-    .gte('created_at', thirtySecondsAgo)
-    .maybeSingle()
-
-  if (recentRemove) {
-    console.log(`[webhook] add ignorado — remove recente detectado para: ${contactPhone}`)
-    return
-  }
-
+async function registrarConversao(supabase: any, client: ClientRow, contactPhone: string): Promise<void> {
   const phoneHashed = crypto.createHash('sha256').update(contactPhone).digest('hex')
 
   const { data: lead } = await supabase
@@ -53,14 +31,12 @@ async function registrarConversao(
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      data: [
-        {
-          event_name: 'Purchase',
-          event_time: Math.floor(Date.now() / 1000),
-          user_data: { ph: [phoneHashed] },
-          custom_data: { currency: 'BRL', value: 0 },
-        },
-      ],
+      data: [{
+        event_name: 'Purchase',
+        event_time: Math.floor(Date.now() / 1000),
+        user_data: { ph: [phoneHashed] },
+        custom_data: { currency: 'BRL', value: 0 },
+      }],
       access_token: client.capi_token,
     }),
   })
@@ -74,6 +50,8 @@ async function registrarConversao(
   console.log(`[webhook] registrado: ${contactPhone} CAPI:${capiData.events_received}`)
 }
 
+const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+
 export async function POST(req: NextRequest) {
   try {
     const supabase = createClient(
@@ -86,8 +64,6 @@ export async function POST(req: NextRequest) {
 
     const event = String(body.event || '')
     const instance = String(body.instance || '')
-
-    // ── labels.association / labels.edit ─────────────────────────────────────
     const type = String(body.data?.type || '')
     const labelId = String(body.data?.labelId || '')
     const chatId = String(body.data?.chatId || '')
@@ -120,13 +96,14 @@ export async function POST(req: NextRequest) {
 
     const contactPhone = chatId.replace('@s.whatsapp.net', '').replace('@lid', '')
 
+    // ── type=remove ──────────────────────────────────────────────────────────
     if (type === 'remove') {
-      // Registrar o evento de remove para bloquear adds colaterais nos próximos 30s
+      // Salvar remove para bloquear add colateral que pode chegar nos próximos segundos
       await supabase
         .from('webhook_events')
         .insert({ client_id: client.id, phone_raw: contactPhone, event_type: 'remove' })
 
-      // Só cancela se existir lead convertido para esse contato
+      // Só cancela se existir lead convertido
       const { data: lead } = await supabase
         .from('leads')
         .select('id')
@@ -146,6 +123,41 @@ export async function POST(req: NextRequest) {
         .eq('id', lead.id)
 
       console.log(`[webhook] cancelado: ${contactPhone}`)
+      return NextResponse.json({ ok: true })
+    }
+
+    // ── type=add ─────────────────────────────────────────────────────────────
+    // Aguardar 3s para o remove colateral ter tempo de chegar e ser salvo
+    await delay(3000)
+
+    // Verificar se chegou algum remove nos últimos 60s para esse contato
+    const sixtySecondsAgo = new Date(Date.now() - 60_000).toISOString()
+    const { data: recentRemove } = await supabase
+      .from('webhook_events')
+      .select('id')
+      .eq('client_id', client.id)
+      .eq('phone_raw', contactPhone)
+      .eq('event_type', 'remove')
+      .gte('created_at', sixtySecondsAgo)
+      .maybeSingle()
+
+    if (recentRemove) {
+      console.log(`[webhook] add ignorado — remove detectado nos últimos 60s para: ${contactPhone}`)
+      return NextResponse.json({ ok: true })
+    }
+
+    // Verificar duplicata: lead convertido já criado nos últimos 60s
+    const { data: recentLead } = await supabase
+      .from('leads')
+      .select('id')
+      .eq('client_id', client.id)
+      .eq('phone_raw', contactPhone)
+      .eq('status', 'converted')
+      .gte('created_at', sixtySecondsAgo)
+      .maybeSingle()
+
+    if (recentLead) {
+      console.log(`[webhook] add ignorado — lead recente já existe para: ${contactPhone}`)
       return NextResponse.json({ ok: true })
     }
 
