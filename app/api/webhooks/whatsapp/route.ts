@@ -87,41 +87,6 @@ export async function POST(req: NextRequest) {
     const event = String(body.event || '')
     const instance = String(body.instance || '')
 
-    // ── chats.update ────────────────────────────────────────────────────────
-    if (event === 'chats.update') {
-      const chats = Array.isArray(body.data) ? body.data : []
-
-      if (chats.length === 0) return NextResponse.json({ ok: true })
-
-      const { data: clients } = await supabase
-        .from('clients')
-        .select('*')
-        .eq('whatsapp_instance', instance)
-        .limit(1)
-
-      if (!clients || clients.length === 0) return NextResponse.json({ ok: true })
-
-      const client = clients[0] as ClientRow
-      const conversionLabelId = String(client.conversion_label_id || '')
-
-      for (const chat of chats) {
-        const labels: Array<{ id?: string }> = Array.isArray(chat.labels) ? chat.labels : []
-        const hasLabel = labels.some((l) => String(l?.id ?? '') === conversionLabelId)
-
-        if (!hasLabel) continue
-
-        const rawId: string = String(chat.id || '')
-        const contactPhone = rawId.replace('@s.whatsapp.net', '').replace('@lid', '')
-
-        if (!contactPhone) continue
-
-        console.log(`[webhook] chats.update com label de conversão: ${contactPhone}`)
-        await registrarConversao(supabase, client, contactPhone)
-      }
-
-      return NextResponse.json({ ok: true })
-    }
-
     // ── labels.association / labels.edit ─────────────────────────────────────
     const type = String(body.data?.type || '')
     const labelId = String(body.data?.labelId || '')
