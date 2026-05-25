@@ -55,5 +55,9 @@ export async function updateSession(request: NextRequest) {
     return NextResponse.redirect(url)
   }
 
+  if (pathname.startsWith('/api/webhooks')) {
+    supabaseResponse.headers.set('Cache-Control', 'no-store')
+  }
+
   return supabaseResponse
 }
