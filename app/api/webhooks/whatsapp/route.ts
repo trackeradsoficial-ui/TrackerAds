@@ -15,6 +15,7 @@ export async function POST(req: NextRequest) {
     )
 
     const body = await req.json()
+    console.log('[webhook] PAYLOAD COMPLETO:', JSON.stringify(body))
     const event = String(body.event || '')
     const type = String(body.data?.type || '')
     const labelId = String(body.data?.labelId || '')
