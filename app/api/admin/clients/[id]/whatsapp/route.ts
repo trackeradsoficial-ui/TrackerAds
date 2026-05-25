@@ -49,7 +49,7 @@ export async function POST(
       },
       body: JSON.stringify({
         instanceName: id,
-        integration: 'WHATSAPP-BAILEYS',
+        integration: 'WHATSAPP-BAILEYS', // v2.2.3
       }),
     })
 

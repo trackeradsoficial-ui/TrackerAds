@@ -41,7 +41,7 @@ export async function GET(
 
   const { id } = await params
 
-  // 1. Criar instância — ignora 400/403 se já existir
+  // 1. Criar instância — ignora erros se já existir
   const createRes = await fetch(`${EVOLUTION_URL}/instance/create`, {
     method: 'POST',
     headers: {
@@ -50,8 +50,7 @@ export async function GET(
     },
     body: JSON.stringify({
       instanceName: id,
-      token: '',
-      qrcode: true,
+      integration: 'WHATSAPP-BAILEYS',
     }),
   })
 
@@ -68,7 +67,7 @@ export async function GET(
     console.log(`[qrcode] Instância "${id}" já existe, seguindo para connect.`)
   }
 
-  // 2. Conectar — v1.8.2 retorna base64 diretamente na resposta
+  // 2. Conectar — v2.2.3 retorna { code, base64 }
   const connectRes = await fetch(`${EVOLUTION_URL}/instance/connect/${id}`, {
     headers: { apikey: EVOLUTION_KEY },
   })
@@ -84,7 +83,7 @@ export async function GET(
 
   const connectData = await connectRes.json()
 
-  // Evolution API v1.8.2 retorna base64 na raiz da resposta
+  // Evolution API v2.2.3 retorna { code, base64 }
   const base64 = connectData?.base64 ?? null
 
   if (!base64) {

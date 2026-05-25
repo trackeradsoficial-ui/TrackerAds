@@ -42,9 +42,10 @@ export async function POST(
       url: `${APP_URL}/api/webhooks/whatsapp`,
       webhook_by_events: false,
       webhook_base64: false,
-      // CONTACTS_UPSERT: salva nome+telefone para enriquecer o evento CAPI (fn/ln)
-      // CHATS_UPDATE:    detecta etiqueta de conversão e dispara Purchase no Facebook
-      events: ['CHATS_UPDATE', 'CONTACTS_UPSERT'],
+      // LABELS_ASSOCIATION: detecta adição/remoção de etiqueta de conversão
+      // CONTACTS_UPSERT:    salva nome+telefone para enriquecer o evento CAPI
+      events: ['LABELS_ASSOCIATION', 'CONTACTS_UPSERT'],
+      enabled: true,
     }),
   })
 
