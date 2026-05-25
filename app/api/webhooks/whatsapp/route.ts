@@ -13,7 +13,7 @@ export async function POST(req: NextRequest) {
     const event = body.event
     console.log('[webhook] evento:', event, '| type:', body.data?.type)
 
-    if (event !== 'labels.association') {
+    if (event !== 'labels.association' && event !== 'labels.edit') {
       return NextResponse.json({ ok: true, ignorado: true })
     }
 
