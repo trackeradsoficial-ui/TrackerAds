@@ -159,18 +159,17 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true })
     }
 
-    // Verificar duplicata: lead convertido já criado nos últimos 60s
-    const { data: recentLead } = await supabase
+    // Verificar duplicata: já existe lead convertido para esse contato (sem limite de tempo)
+    const { data: existingLead } = await supabase
       .from('leads')
       .select('id')
       .eq('client_id', client.id)
       .eq('phone_raw', contactPhone)
       .eq('status', 'converted')
-      .gte('created_at', sixtySecondsAgo)
       .maybeSingle()
 
-    if (recentLead) {
-      console.log(`[webhook] add ignorado — lead recente já existe para: ${contactPhone}`)
+    if (existingLead) {
+      console.log(`[webhook] add ignorado — lead convertido já existe para: ${contactPhone}`)
       return NextResponse.json({ ok: true })
     }
 
