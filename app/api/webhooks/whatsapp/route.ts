@@ -7,6 +7,73 @@ import crypto from 'crypto'
 const lastAddTimestamp = new Map<string, number>()
 const ADD_GRACE_PERIOD_MS = 10_000 // 10 segundos
 
+interface ClientRow {
+  id: string
+  conversion_label_id: string | null
+  conversion_label: string | null
+  pixel_id: string
+  capi_token: string
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function registrarConversao(
+  supabase: any,
+  client: ClientRow,
+  contactPhone: string
+): Promise<void> {
+  const { data: existing } = await supabase
+    .from('leads')
+    .select('id')
+    .eq('client_id', client.id)
+    .eq('phone_raw', contactPhone)
+    .eq('status', 'converted')
+    .maybeSingle()
+
+  if (existing) {
+    console.log(`[webhook] duplicata: ${contactPhone}`)
+    return
+  }
+
+  const phoneHashed = crypto.createHash('sha256').update(contactPhone).digest('hex')
+
+  const { data: lead } = await supabase
+    .from('leads')
+    .insert({
+      client_id: client.id,
+      phone_raw: contactPhone,
+      phone_hashed: phoneHashed,
+      label: client.conversion_label || 'Comprou',
+      status: 'converted',
+      facebook_event_sent: false,
+    })
+    .select()
+    .single()
+
+  const capiRes = await fetch(`https://graph.facebook.com/v19.0/${client.pixel_id}/events`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      data: [
+        {
+          event_name: 'Purchase',
+          event_time: Math.floor(Date.now() / 1000),
+          user_data: { ph: [phoneHashed] },
+          custom_data: { currency: 'BRL', value: 0 },
+        },
+      ],
+      access_token: client.capi_token,
+    }),
+  })
+
+  const capiData = await capiRes.json()
+  await supabase
+    .from('leads')
+    .update({ facebook_event_sent: true, facebook_event_response: capiData })
+    .eq('id', lead?.id)
+
+  console.log(`[webhook] registrado: ${contactPhone} CAPI:${capiData.events_received}`)
+}
+
 export async function POST(req: NextRequest) {
   try {
     const supabase = createClient(
@@ -16,13 +83,50 @@ export async function POST(req: NextRequest) {
 
     const body = await req.json()
     console.log('[webhook] PAYLOAD COMPLETO:', JSON.stringify(body))
+
     const event = String(body.event || '')
+    const instance = String(body.instance || '')
+
+    // ── chats.update ────────────────────────────────────────────────────────
+    if (event === 'chats.update') {
+      const chats = Array.isArray(body.data) ? body.data : []
+
+      if (chats.length === 0) return NextResponse.json({ ok: true })
+
+      const { data: clients } = await supabase
+        .from('clients')
+        .select('*')
+        .eq('whatsapp_instance', instance)
+        .limit(1)
+
+      if (!clients || clients.length === 0) return NextResponse.json({ ok: true })
+
+      const client = clients[0] as ClientRow
+      const conversionLabelId = String(client.conversion_label_id || '')
+
+      for (const chat of chats) {
+        const labels: Array<{ id?: string }> = Array.isArray(chat.labels) ? chat.labels : []
+        const hasLabel = labels.some((l) => String(l?.id ?? '') === conversionLabelId)
+
+        if (!hasLabel) continue
+
+        const rawId: string = String(chat.id || '')
+        const contactPhone = rawId.replace('@s.whatsapp.net', '').replace('@lid', '')
+
+        if (!contactPhone) continue
+
+        console.log(`[webhook] chats.update com label de conversão: ${contactPhone}`)
+        await registrarConversao(supabase, client, contactPhone)
+      }
+
+      return NextResponse.json({ ok: true })
+    }
+
+    // ── labels.association / labels.edit ─────────────────────────────────────
     const type = String(body.data?.type || '')
     const labelId = String(body.data?.labelId || '')
     const chatId = String(body.data?.chatId || '')
-    const instance = String(body.instance || '')
 
-    // IGNORA TUDO exceto labels.association com type add/remove e campos preenchidos
     if (event !== 'labels.association' && event !== 'labels.edit') {
       return NextResponse.json({ ok: true })
     }
@@ -47,7 +151,7 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    console.log(`[webhook] labels.association type=${type} labelId=${labelId} chatId=${chatId}`)
+    console.log(`[webhook] ${event} type=${type} labelId=${labelId} chatId=${chatId}`)
 
     const { data: clients } = await supabase
       .from('clients')
@@ -55,11 +159,9 @@ export async function POST(req: NextRequest) {
       .eq('whatsapp_instance', instance)
       .limit(1)
 
-    if (!clients || clients.length === 0) {
-      return NextResponse.json({ ok: true })
-    }
+    if (!clients || clients.length === 0) return NextResponse.json({ ok: true })
 
-    const client = clients[0]
+    const client = clients[0] as ClientRow
 
     if (labelId !== String(client.conversion_label_id || '')) {
       return NextResponse.json({ ok: true })
@@ -68,7 +170,9 @@ export async function POST(req: NextRequest) {
     const contactPhone = chatId.replace('@s.whatsapp.net', '').replace('@lid', '')
 
     if (type === 'remove') {
-      await supabase.from('leads').update({ status: 'cancelled' })
+      await supabase
+        .from('leads')
+        .update({ status: 'cancelled' })
         .eq('client_id', client.id)
         .eq('phone_raw', contactPhone)
         .eq('status', 'converted')
@@ -76,41 +180,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true })
     }
 
-    const { data: existing } = await supabase.from('leads').select('id')
-      .eq('client_id', client.id)
-      .eq('phone_raw', contactPhone)
-      .eq('status', 'converted')
-      .maybeSingle()
-
-    if (existing) {
-      console.log(`[webhook] duplicata: ${contactPhone}`)
-      return NextResponse.json({ ok: true })
-    }
-
-    const phoneHashed = crypto.createHash('sha256').update(contactPhone).digest('hex')
-
-    const { data: lead } = await supabase.from('leads').insert({
-      client_id: client.id,
-      phone_raw: contactPhone,
-      phone_hashed: phoneHashed,
-      label: client.conversion_label || 'Comprou',
-      status: 'converted',
-      facebook_event_sent: false
-    }).select().single()
-
-    const capiRes = await fetch(`https://graph.facebook.com/v19.0/${client.pixel_id}/events`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        data: [{ event_name: 'Purchase', event_time: Math.floor(Date.now() / 1000), user_data: { ph: [phoneHashed] }, custom_data: { currency: 'BRL', value: 0 } }],
-        access_token: client.capi_token
-      })
-    })
-
-    const capiData = await capiRes.json()
-    await supabase.from('leads').update({ facebook_event_sent: true, facebook_event_response: capiData }).eq('id', lead?.id)
-
-    console.log(`[webhook] registrado: ${contactPhone} CAPI:${capiData.events_received}`)
+    await registrarConversao(supabase, client, contactPhone)
     return NextResponse.json({ ok: true })
 
   } catch (e: any) {
