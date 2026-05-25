@@ -8,11 +8,105 @@ interface ClientRow {
   conversion_label: string | null
   pixel_id: string
   capi_token: string
+  whatsapp_instance: string
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function registrarConversao(supabase: any, client: ClientRow, contactPhone: string): Promise<void> {
-  const phoneHashed = crypto.createHash('sha256').update(contactPhone).digest('hex')
+// Resolve número real e nome do contato quando chatId vem como @lid
+async function resolverContato(
+  chatId: string,
+  instance: string
+): Promise<{ phone: string; name: string }> {
+  const isLid = chatId.endsWith('@lid')
+
+  if (!isLid) {
+    // Já é número real: só limpa o sufixo
+    const phone = chatId.replace('@s.whatsapp.net', '').replace(/\D/g, '')
+    return { phone, name: '' }
+  }
+
+  // Chama a Evolution API para buscar o contato pelo @lid
+  try {
+    const EVOLUTION_URL = process.env.EVOLUTION_API_URL!
+    const EVOLUTION_KEY = process.env.EVOLUTION_API_KEY!
+
+    const res = await fetch(
+      `${EVOLUTION_URL}/chat/whatsappNumbers/${instance}`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          apikey: EVOLUTION_KEY,
+        },
+        body: JSON.stringify({ numbers: [chatId] }),
+      }
+    )
+
+    if (res.ok) {
+      const data = await res.json()
+      // Resposta: [{ exists: true, jid: "5519...@s.whatsapp.net", ... }]
+      const entry = Array.isArray(data) ? data[0] : null
+      if (entry?.jid) {
+        const phone = entry.jid
+          .replace('@s.whatsapp.net', '')
+          .replace(/\D/g, '')
+        const name: string = entry.name || entry.pushName || ''
+        console.log(`[webhook] @lid resolvido: ${chatId} → ${phone} (${name})`)
+        return { phone, name }
+      }
+    }
+
+    // Fallback: tenta buscar nos contatos salvos
+    const res2 = await fetch(
+      `${EVOLUTION_URL}/contacts/fetchContacts/${instance}`,
+      {
+        method: 'GET',
+        headers: { apikey: EVOLUTION_KEY },
+      }
+    )
+
+    if (res2.ok) {
+      const contacts = await res2.json()
+      const lidNumber = chatId.replace('@lid', '')
+      const found = Array.isArray(contacts)
+        ? contacts.find(
+            (c: any) =>
+              c.id === chatId ||
+              c.lid === chatId ||
+              c.lid === lidNumber
+          )
+        : null
+
+      if (found) {
+        const phone = (found.remoteJid || found.id || '')
+          .replace('@s.whatsapp.net', '')
+          .replace(/\D/g, '')
+        const name: string = found.pushName || found.name || ''
+        console.log(`[webhook] contato encontrado: ${chatId} → ${phone} (${name})`)
+        return { phone, name }
+      }
+    }
+  } catch (err: any) {
+    console.error(`[webhook] erro ao resolver @lid: ${err.message}`)
+  }
+
+  // Último fallback: usa o @lid mesmo (melhor do que nada)
+  const phone = chatId.replace('@lid', '').replace(/\D/g, '')
+  console.warn(`[webhook] não foi possível resolver @lid, usando bruto: ${phone}`)
+  return { phone, name: '' }
+}
+
+async function registrarConversao(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  supabase: any,
+  client: ClientRow,
+  contactPhone: string,
+  contactName: string,
+  chatIdRaw: string
+): Promise<void> {
+  const phoneHashed = crypto
+    .createHash('sha256')
+    .update(contactPhone)
+    .digest('hex')
 
   const { data: lead, error: insertError } = await supabase
     .from('leads')
@@ -20,6 +114,8 @@ async function registrarConversao(supabase: any, client: ClientRow, contactPhone
       client_id: client.id,
       phone_raw: contactPhone,
       phone_hashed: phoneHashed,
+      contact_name: contactName || null,
+      chat_id_raw: chatIdRaw,
       label: client.conversion_label || 'Comprou',
       status: 'converted',
       facebook_event_sent: false,
@@ -32,23 +128,29 @@ async function registrarConversao(supabase: any, client: ClientRow, contactPhone
     return
   }
 
-  console.log(`[webhook] lead inserido: ${lead?.id} para ${contactPhone}`)
+  console.log(`[webhook] lead inserido: ${lead?.id} | ${contactPhone} | ${contactName}`)
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let capiData: any = null
   try {
-    const capiRes = await fetch(`https://graph.facebook.com/v19.0/${client.pixel_id}/events`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        data: [{
-          event_name: 'Purchase',
-          event_time: Math.floor(Date.now() / 1000),
-          user_data: { ph: [phoneHashed] },
-          custom_data: { currency: 'BRL', value: 0 },
-        }],
-        access_token: client.capi_token,
-      }),
-    })
+    const capiRes = await fetch(
+      `https://graph.facebook.com/v19.0/${client.pixel_id}/events`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          data: [
+            {
+              event_name: 'Purchase',
+              event_time: Math.floor(Date.now() / 1000),
+              user_data: { ph: [phoneHashed] },
+              custom_data: { currency: 'BRL', value: 0 },
+            },
+          ],
+          access_token: client.capi_token,
+        }),
+      }
+    )
     capiData = await capiRes.json()
     console.log(`[webhook] CAPI resposta: ${JSON.stringify(capiData)}`)
   } catch (capiErr: any) {
@@ -64,10 +166,12 @@ async function registrarConversao(supabase: any, client: ClientRow, contactPhone
     console.error('[webhook] erro ao atualizar lead:', updateError.message)
   }
 
-  console.log(`[webhook] registrado: ${contactPhone} CAPI:${capiData?.events_received ?? 'erro'}`)
+  console.log(
+    `[webhook] registrado: ${contactPhone} CAPI:${capiData?.events_received ?? 'erro'}`
+  )
 }
 
-const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
 export async function POST(req: NextRequest) {
   try {
@@ -111,22 +215,31 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true })
     }
 
-    const contactPhone = chatId.replace('@s.whatsapp.net', '').replace('@lid', '')
+    // Resolve número real e nome (faz chamada à Evolution se for @lid)
+    const { phone: contactPhone, name: contactName } = await resolverContato(
+      chatId,
+      instance
+    )
 
-    // ── type=remove ──────────────────────────────────────────────────────────
+    if (!contactPhone) {
+      console.error(`[webhook] não foi possível obter telefone para chatId: ${chatId}`)
+      return NextResponse.json({ ok: true })
+    }
+
+    // ── type=remove ────────────────────────────────────────────────────────
     if (type === 'remove') {
-      // Salvar remove para bloquear add colateral que pode chegar nos próximos segundos
       await supabase
         .from('webhook_events')
         .insert({ client_id: client.id, phone_raw: contactPhone, event_type: 'remove' })
 
-      // Só cancela se existir lead convertido
+      // Busca por phone_raw OU chat_id_raw para garantir que encontra mesmo
+      // se o @lid foi salvo diferente da primeira vez
       const { data: lead } = await supabase
         .from('leads')
         .select('id')
         .eq('client_id', client.id)
-        .eq('phone_raw', contactPhone)
         .eq('status', 'converted')
+        .or(`phone_raw.eq.${contactPhone},chat_id_raw.eq.${chatId}`)
         .maybeSingle()
 
       if (!lead) {
@@ -143,12 +256,12 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true })
     }
 
-    // ── type=add ─────────────────────────────────────────────────────────────
-    // Aguardar 3s para o remove colateral ter tempo de chegar e ser salvo
+    // ── type=add ───────────────────────────────────────────────────────────
     await delay(3000)
 
-    // Verificar se chegou algum remove nos últimos 60s para esse contato
     const sixtySecondsAgo = new Date(Date.now() - 60_000).toISOString()
+
+    // Verifica remove recente pelo telefone resolvido
     const { data: recentRemove } = await supabase
       .from('webhook_events')
       .select('id')
@@ -163,13 +276,13 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true })
     }
 
-    // Verificar duplicata: já existe lead convertido para esse contato (sem limite de tempo)
+    // Verifica duplicata por phone_raw OU chat_id_raw
     const { data: existingLead } = await supabase
       .from('leads')
       .select('id')
       .eq('client_id', client.id)
-      .eq('phone_raw', contactPhone)
       .eq('status', 'converted')
+      .or(`phone_raw.eq.${contactPhone},chat_id_raw.eq.${chatId}`)
       .maybeSingle()
 
     if (existingLead) {
@@ -177,13 +290,13 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true })
     }
 
-    // Verificar se lead foi cancelado nos últimos 60s (remove acabou de acontecer)
+    // Verifica cancelamento recente
     const { data: recentCancelled } = await supabase
       .from('leads')
       .select('id')
       .eq('client_id', client.id)
-      .eq('phone_raw', contactPhone)
       .eq('status', 'cancelled')
+      .or(`phone_raw.eq.${contactPhone},chat_id_raw.eq.${chatId}`)
       .gte('updated_at', sixtySecondsAgo)
       .maybeSingle()
 
@@ -192,7 +305,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true })
     }
 
-    await registrarConversao(supabase, client, contactPhone)
+    await registrarConversao(supabase, client, contactPhone, contactName, chatId)
     return NextResponse.json({ ok: true })
 
   } catch (e: any) {
