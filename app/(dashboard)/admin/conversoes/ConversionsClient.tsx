@@ -14,7 +14,7 @@ import {
 interface Lead {
   id: string
   client_id: string
-  phone_raw: string
+  phone_raw: string | null
   label: string | null
   created_at: string
   facebook_event_sent: boolean
@@ -26,8 +26,8 @@ interface ClientItem {
   company_name: string
 }
 
-function maskPhone(phone: string) {
-  if (phone.length < 6) return '***'
+function maskPhone(phone: string | null) {
+  if (!phone || phone.length < 6) return '***'
   return phone.slice(0, 4) + '****' + phone.slice(-2)
 }
 
@@ -67,7 +67,7 @@ export default function ConversionsClient({
       if (search) {
         const q = search.toLowerCase()
         const name  = (clientMap[l.client_id] ?? '').toLowerCase()
-        const phone = l.phone_raw.toLowerCase()
+        const phone = (l.phone_raw ?? '').toLowerCase()
         const label = (l.label ?? '').toLowerCase()
         if (!name.includes(q) && !phone.includes(q) && !label.includes(q)) return false
       }

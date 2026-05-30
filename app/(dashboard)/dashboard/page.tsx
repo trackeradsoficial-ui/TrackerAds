@@ -14,8 +14,8 @@ import {
 
 export const dynamic = 'force-dynamic'
 
-function maskPhone(phone: string) {
-  if (phone.length < 6) return '***'
+function maskPhone(phone: string | null) {
+  if (!phone || phone.length < 6) return '***'
   return phone.slice(0, 4) + '****' + phone.slice(-2)
 }
 

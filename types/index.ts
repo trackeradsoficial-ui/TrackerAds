@@ -24,8 +24,8 @@ export interface Client {
 export interface Lead {
   id: string
   client_id: string
-  phone_raw: string
-  phone_hashed: string
+  phone_raw: string | null
+  phone_hashed: string | null
   label: string | null
   status: 'converted' | 'pending'
   facebook_event_sent: boolean
@@ -90,3 +90,32 @@ export interface ClientStats {
   total_conversions: number
   conversion_rate: number
 }
+
+// ── CRM ───────────────────────────────────────────────────────────────────────
+
+export type CrmStage = 'novo' | 'qualificando' | 'proposta' | 'negociando' | 'fechado' | 'perdido'
+
+export interface CrmLead {
+  id: number
+  phone: string
+  phone_hashed: string
+  name: string | null
+  last_message: string | null
+  stage: CrmStage
+  sale_value: number | null
+  currency: string | null
+  capi_sent: boolean
+  capi_event_id: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface CrmMessage {
+  id: number
+  lead_id: number
+  direction: 'in' | 'out'
+  content: string | null
+  timestamp: string
+}
+
+export type CrmBoard = Record<CrmStage, CrmLead[]>

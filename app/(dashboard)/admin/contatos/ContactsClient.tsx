@@ -13,7 +13,7 @@ import {
 interface Lead {
   id: string
   client_id: string
-  phone_raw: string
+  phone_raw: string | null
   created_at: string
   label: string | null
   facebook_event_sent: boolean
@@ -24,15 +24,15 @@ interface ClientItem {
   company_name: string
 }
 
-function maskPhone(phone: string) {
-  if (phone.length < 6) return '***'
+function maskPhone(phone: string | null) {
+  if (!phone || phone.length < 6) return '***'
   return phone.slice(0, 4) + '****' + phone.slice(-2)
 }
 
 // Each unique phone per client is a "contact"; use first seen date
 function buildContacts(leads: Lead[], clientMap: Record<string, string>) {
   const seen = new Map<string, {
-    phone: string
+    phone: string | null
     client_id: string
     clientName: string
     firstContact: string
@@ -41,7 +41,7 @@ function buildContacts(leads: Lead[], clientMap: Record<string, string>) {
   }>()
 
   for (const l of [...leads].reverse()) { // reverse to get first occurrence
-    const key = `${l.client_id}::${l.phone_raw}`
+    const key = `${l.client_id}::${l.phone_raw ?? ''}`
     if (!seen.has(key)) {
       seen.set(key, {
         phone:        l.phone_raw,
@@ -85,7 +85,7 @@ export default function ContactsClient({
       if (search) {
         const q = search.toLowerCase()
         if (
-          !c.phone.toLowerCase().includes(q) &&
+          !(c.phone ?? '').toLowerCase().includes(q) &&
           !c.clientName.toLowerCase().includes(q) &&
           !(c.label ?? '').toLowerCase().includes(q)
         ) return false

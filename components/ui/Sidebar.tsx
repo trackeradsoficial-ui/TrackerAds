@@ -16,6 +16,7 @@ import {
   Moon,
   Sun,
   Zap,
+  Kanban,
 } from 'lucide-react'
 
 interface SidebarProps {
@@ -27,6 +28,7 @@ interface SidebarProps {
 const adminLinks = [
   { href: '/admin/dashboard', label: 'Dashboard',    icon: LayoutDashboard },
   { href: '/admin',           label: 'Clientes',     icon: Users           },
+  { href: '/admin/crm',       label: 'CRM',          icon: Kanban          },
   { href: '/admin/conversoes',label: 'Conversões',   icon: ArrowLeftRight  },
   { href: '/admin/contatos',  label: 'Contatos',     icon: Contact         },
   { href: '/admin/settings',  label: 'Configurações',icon: Settings        },

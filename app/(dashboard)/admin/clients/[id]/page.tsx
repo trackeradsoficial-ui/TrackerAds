@@ -1,9 +1,9 @@
 import { redirect } from 'next/navigation'
 import { createClient } from '@/lib/supabase/server'
 import Link from 'next/link'
-
-export const dynamic = 'force-dynamic'
 import ClientEditForm from './ClientEditForm'
+import ManualConversionForm from './ManualConversionForm'
+import EventLabelsForm, { type EventLabel } from './EventLabelsForm'
 import type { Lead } from '@/types'
 import ConversionsChart from '@/components/ui/ConversionsChart'
 import {
@@ -14,10 +14,15 @@ import {
   CheckCircle2,
   XCircle,
   ChevronLeft,
+  Upload,
+  ShoppingCart,
+  UserPlus,
 } from 'lucide-react'
 
-function maskPhone(phone: string) {
-  if (phone.length < 6) return '***'
+export const dynamic = 'force-dynamic'
+
+function maskPhone(phone: string | null) {
+  if (!phone || phone.length < 6) return '***'
   return phone.slice(0, 4) + '****' + phone.slice(-2)
 }
 
@@ -75,13 +80,35 @@ export default async function ClientDetailPage({
     .eq('client_id', id)
     .order('created_at', { ascending: false })
 
+  const { data: eventLabels } = await supabase
+    .from('client_event_labels')
+    .select('id, label, event_name')
+    .eq('client_id', id)
+
   const allLeads = (leads ?? []) as Lead[]
+  const mappings = (eventLabels ?? []) as EventLabel[]
+
+  const labelToEvent = Object.fromEntries(mappings.map((m) => [m.label, m.event_name]))
+
   const totalLeads    = allLeads.length
   const totalSent     = allLeads.filter((l) => l.facebook_event_sent).length
   const totalFailed   = totalLeads - totalSent
   const convRate      = totalLeads > 0 ? Math.round((totalSent / totalLeads) * 100) : 0
   const recentLeads   = allLeads.slice(0, 20)
   const chartData     = buildChartData(allLeads)
+
+  const countByEvent = (eventName: string) =>
+    allLeads.filter((l) => {
+      if (!l.facebook_event_sent) return false
+      const lbl = l.label ?? ''
+      // label é diretamente o nome do evento (importação em lote)
+      // ou mapeado via client_event_labels (webhook)
+      return lbl === eventName || labelToEvent[lbl] === eventName
+    }).length
+
+  const totalPurchase         = countByEvent('Purchase')
+  const totalInitiateCheckout = countByEvent('InitiateCheckout')
+  const totalLead             = countByEvent('Lead')
 
   return (
     <div className="space-y-6">
@@ -93,20 +120,29 @@ export default async function ClientDetailPage({
         >
           <ChevronLeft size={14} /> Clientes
         </Link>
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-[var(--brand-light)] flex items-center justify-center shrink-0">
-            <span className="text-lg font-bold text-[var(--brand)]">
-              {client.company_name.charAt(0).toUpperCase()}
-            </span>
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-[var(--brand-light)] flex items-center justify-center shrink-0">
+              <span className="text-lg font-bold text-[var(--brand)]">
+                {client.company_name.charAt(0).toUpperCase()}
+              </span>
+            </div>
+            <div>
+              <h1 className="text-2xl font-bold text-[var(--text-primary)]">{client.company_name}</h1>
+              <p className="text-sm text-[var(--text-secondary)]">{client.email}</p>
+            </div>
           </div>
-          <div>
-            <h1 className="text-2xl font-bold text-[var(--text-primary)]">{client.company_name}</h1>
-            <p className="text-sm text-[var(--text-secondary)]">{client.email}</p>
-          </div>
+          <Link
+            href={`/admin/clients/${id}/import`}
+            className="inline-flex items-center gap-2 px-3 py-2 text-sm font-medium rounded-lg border border-[var(--border)] bg-[var(--bg-card)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-base)] transition-colors shrink-0"
+          >
+            <Upload size={14} />
+            Importar Conversões Históricas
+          </Link>
         </div>
       </div>
 
-      {/* Stats */}
+      {/* Stats — linha 1 */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <StatCard
           label="Total de Leads"
@@ -138,6 +174,31 @@ export default async function ClientDetailPage({
         />
       </div>
 
+      {/* Stats — linha 2: por evento */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <StatCard
+          label="Purchase"
+          value={totalPurchase}
+          sub="compras enviadas ao CAPI"
+          icon={<Send size={18} className="text-emerald-600" />}
+          bg="bg-emerald-50 dark:bg-emerald-950"
+        />
+        <StatCard
+          label="Initiate Checkout"
+          value={totalInitiateCheckout}
+          sub="carrinhos enviados ao CAPI"
+          icon={<ShoppingCart size={18} className="text-blue-500" />}
+          bg="bg-blue-50 dark:bg-blue-950"
+        />
+        <StatCard
+          label="Cadastro (Lead)"
+          value={totalLead}
+          sub="cadastros enviados ao CAPI"
+          icon={<UserPlus size={18} className="text-purple-500" />}
+          bg="bg-purple-50 dark:bg-purple-950"
+        />
+      </div>
+
       {/* Chart */}
       <div className="bg-[var(--bg-card)] rounded-2xl border border-[var(--border)] p-5 shadow-[var(--shadow-sm)]">
         <div className="flex items-center justify-between mb-4">
@@ -152,6 +213,12 @@ export default async function ClientDetailPage({
 
       {/* Edit form + WhatsApp */}
       <ClientEditForm client={client} />
+
+      {/* Mapeamento de etiquetas */}
+      <EventLabelsForm clientId={id} initialMappings={mappings} />
+
+      {/* Manual conversion */}
+      <ManualConversionForm clientId={id} />
 
       {/* Recent leads */}
       <div className="bg-[var(--bg-card)] rounded-2xl border border-[var(--border)] shadow-[var(--shadow-sm)] overflow-hidden">
