@@ -7,14 +7,6 @@ export async function proxy(request: NextRequest) {
 
 export const config = {
   matcher: [
-    /*
-     * Aplica em todas as rotas, exceto:
-     * - _next/static  (arquivos estáticos)
-     * - _next/image   (otimização de imagem)
-     * - favicon.ico
-     * - /connect/*    (página pública de conexão WhatsApp)
-     * - /api/connect/* (API pública de conexão WhatsApp)
-     */
-    '/((?!_next/static|_next/image|favicon.ico|connect|api/connect).*)',
+    '/((?!_next/static|_next/image|favicon.ico|connect|api/connect|api/crm/webhook).*)',
   ],
 }
