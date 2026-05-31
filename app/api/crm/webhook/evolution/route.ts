@@ -23,6 +23,7 @@ export async function POST(req: NextRequest) {
     const phone = remoteJid.replace('@s.whatsapp.net', '').replace(/\D/g, '')
     if (!phone) return NextResponse.json({ ok: true })
 
+    const pushName: string = (data?.pushName as string) ?? ''
     const message = data?.message as Record<string, unknown> | undefined
     const extMsg = message?.extendedTextMessage as Record<string, unknown> | undefined
     const content: string = (message?.conversation as string) ?? (extMsg?.text as string) ?? ''
@@ -31,12 +32,12 @@ export async function POST(req: NextRequest) {
 
     const supabase = serviceClient()
 
+    const upsertData: Record<string, unknown> = { phone, phone_hashed, last_message: content }
+    if (pushName) upsertData.name = pushName
+
     const { data: lead, error } = await supabase
       .from('crm_leads')
-      .upsert(
-        { phone, phone_hashed, last_message: content },
-        { onConflict: 'phone', ignoreDuplicates: false }
-      )
+      .upsert(upsertData, { onConflict: 'phone', ignoreDuplicates: false })
       .select()
       .single()
 
