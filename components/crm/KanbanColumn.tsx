@@ -22,6 +22,15 @@ const LABELS: Record<CrmStage, string> = {
   perdido:      'Perdido ✗',
 }
 
+const DESCRIPTIONS: Record<CrmStage, string> = {
+  novo:         'Lead recém chegado, ainda não contatado',
+  qualificando: 'Verificando se tem interesse e perfil de compra',
+  proposta:     'Oferta enviada, aguardando análise',
+  negociando:   'Em negociação de preço ou condições',
+  fechado:      'Venda concluída com sucesso',
+  perdido:      'Lead desistiu ou não teve interesse',
+}
+
 interface Props {
   stage: CrmStage
   leads: CrmLead[]
@@ -33,9 +42,12 @@ export default function CrmKanbanColumn({ stage, leads, onCardClick }: Props) {
 
   return (
     <div className={`flex flex-col bg-gray-50 rounded-2xl ring-1 ${ring} min-w-[260px] max-w-[280px] flex-shrink-0`}>
-      <div className={`${header} rounded-t-2xl px-4 py-2.5 flex items-center justify-between`}>
-        <span className="text-white text-sm font-semibold">{LABELS[stage]}</span>
-        <span className="bg-white/20 text-white text-xs font-bold px-2 py-0.5 rounded-full">{leads.length}</span>
+      <div className={`${header} rounded-t-2xl px-4 py-3`}>
+        <div className="flex items-center justify-between mb-1">
+          <span className="text-white text-sm font-semibold">{LABELS[stage]}</span>
+          <span className="bg-white/20 text-white text-xs font-bold px-2 py-0.5 rounded-full">{leads.length}</span>
+        </div>
+        <p className="text-white/75 text-xs leading-tight">{DESCRIPTIONS[stage]}</p>
       </div>
 
       <Droppable droppableId={stage}>
