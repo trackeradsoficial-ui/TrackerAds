@@ -12,6 +12,7 @@ function serviceClient() {
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json() as Record<string, unknown>
+    console.log('[webhook] body completo:', JSON.stringify(body).slice(0, 500))
     if (body.event !== 'messages.upsert') return NextResponse.json({ ok: true })
 
     const data = body.data as Record<string, unknown>
