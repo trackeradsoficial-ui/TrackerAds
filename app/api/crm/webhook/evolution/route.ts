@@ -12,8 +12,15 @@ function serviceClient() {
 async function fetchContactName(phone: string): Promise<string | null> {
   try {
     const res = await fetch(
-      `${process.env.EVOLUTION_API_URL}/contact/findContacts/60fd482b-4221-4ef6-80b4-57c9f012d4c7?where[remoteJid]=${phone}@s.whatsapp.net`,
-      { headers: { apikey: process.env.EVOLUTION_API_KEY! } }
+      `${process.env.EVOLUTION_API_URL}/chat/findContacts/60fd482b-4221-4ef6-80b4-57c9f012d4c7`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          apikey: process.env.EVOLUTION_API_KEY!
+        },
+        body: JSON.stringify({ where: { remoteJid: `${phone}@s.whatsapp.net` } })
+      }
     )
     const data = await res.json()
     return data?.[0]?.pushName || data?.[0]?.name || null
