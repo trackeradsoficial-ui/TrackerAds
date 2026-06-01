@@ -93,7 +93,7 @@ export interface ClientStats {
 
 // ── CRM ───────────────────────────────────────────────────────────────────────
 
-export type CrmStage = 'novo' | 'qualificando' | 'proposta' | 'negociando' | 'fechado' | 'perdido'
+export type CrmStage = 'cadastrou_no_sistema' | 'novo' | 'qualificando' | 'proposta' | 'negociando' | 'fechado' | 'perdido'
 
 export interface CrmLead {
   id: number

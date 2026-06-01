@@ -5,6 +5,7 @@ import CrmLeadCard from './LeadCard'
 import type { CrmLead, CrmStage } from '@/types'
 
 const STYLE: Record<CrmStage, { header: string; ring: string }> = {
+  cadastrou_no_sistema: { header: 'bg-purple-500', ring: 'ring-purple-200' },
   novo:         { header: 'bg-gray-500',   ring: 'ring-gray-200'   },
   qualificando: { header: 'bg-blue-500',   ring: 'ring-blue-200'   },
   proposta:     { header: 'bg-yellow-500', ring: 'ring-yellow-200' },
@@ -14,6 +15,7 @@ const STYLE: Record<CrmStage, { header: string; ring: string }> = {
 }
 
 const LABELS: Record<CrmStage, string> = {
+  cadastrou_no_sistema: 'Cadastrou no Sistema',
   novo:         'Novo Lead',
   qualificando: 'Qualificando',
   proposta:     'Proposta',
@@ -23,6 +25,7 @@ const LABELS: Record<CrmStage, string> = {
 }
 
 const DESCRIPTIONS: Record<CrmStage, string> = {
+  cadastrou_no_sistema: 'Lead acabou de se cadastrar no sistema',
   novo:         'Lead recém chegado, ainda não contatado',
   qualificando: 'Verificando se tem interesse e perfil de compra',
   proposta:     'Oferta enviada, aguardando análise',

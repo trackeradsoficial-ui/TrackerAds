@@ -9,7 +9,7 @@ import CrmSaleModal from './SaleModal'
 import NewLeadModal from './NewLeadModal'
 import type { CrmBoard, CrmLead, CrmStage } from '@/types'
 
-const STAGES: CrmStage[] = ['novo', 'qualificando', 'proposta', 'negociando', 'fechado', 'perdido']
+const STAGES: CrmStage[] = ['cadastrou_no_sistema', 'novo', 'qualificando', 'proposta', 'negociando', 'fechado', 'perdido']
 const EMPTY_BOARD = Object.fromEntries(STAGES.map((s) => [s, []])) as unknown as CrmBoard
 
 interface PendingDrop {
