@@ -9,6 +9,19 @@ function serviceClient() {
   )
 }
 
+async function fetchContactName(phone: string): Promise<string | null> {
+  try {
+    const res = await fetch(
+      `${process.env.EVOLUTION_API_URL}/contact/findContacts/60fd482b-4221-4ef6-80b4-57c9f012d4c7?where[remoteJid]=${phone}@s.whatsapp.net`,
+      { headers: { apikey: process.env.EVOLUTION_API_KEY! } }
+    )
+    const data = await res.json()
+    return data?.[0]?.pushName || data?.[0]?.name || null
+  } catch {
+    return null
+  }
+}
+
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json() as Record<string, unknown>
@@ -24,7 +37,11 @@ export async function POST(req: NextRequest) {
     const phone = remoteJid.replace('@s.whatsapp.net', '').replace(/\D/g, '')
     if (!phone) return NextResponse.json({ ok: true })
 
-    const pushName: string = (data?.pushName as string) ?? ''
+    let pushName: string = (data?.pushName as string) ?? ''
+    if (key?.fromMe && phone) {
+      const contactName = await fetchContactName(phone)
+      if (contactName) pushName = contactName
+    }
     const message = data?.message as Record<string, unknown> | undefined
     const extMsg = message?.extendedTextMessage as Record<string, unknown> | undefined
     const content: string = (message?.conversation as string) ?? (extMsg?.text as string) ?? ''
